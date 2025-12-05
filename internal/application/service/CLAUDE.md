@@ -1,0 +1,214 @@
+[根目录](../../../../CLAUDE.md) > [internal](../../) > [application](../) > **service**
+
+# internal/application/service 模块
+
+## 模块职责
+
+`internal/application/service` 模块是 WeKnora 的业务服务层，负责实现核心业务逻辑、编排数据访问、处理业务规则和事务。该层采用领域驱动设计（DDD）思想，将复杂的业务需求分解为独立的服务模块。
+
+## 核心服务模块
+
+### 1. 对话流水线服务 (`chat_pipeline/`)
+实现完整的 RAG 对话流程，包括搜索、重排、生成等步骤。
+
+#### 核心组件
+- **chat_pipline.go**: 流水线事件管理和插件系统
+- **chat_completion.go**: 对话生成服务
+- **search.go**: 检索服务实现
+- **rerank.go**: 结果重排序
+- **rewrite.go**: 查询重写
+- **extract_entity.go**: 实体提取
+
+#### 特性
+- 事件驱动的插件架构
+- 支持流式处理
+- 可配置的检索策略
+- 多模态支持
+
+### 2. 评估指标服务 (`metric/`)
+提供全面的评估指标计算，支持 RAG 系统效果评估。
+
+#### 指标类型
+- **召回率 (Recall)**: 衡量检索完整性
+- **精确率 (Precision)**: 衡量检索准确性
+- **F1 分数**: 综合评估指标
+- **MRR**: 平均倒数排名
+- **NDCG**: 归一化折损累计增益
+- **BLEU**: 文本相似度
+- **ROUGE**: 摘要质量评估
+
+### 3. 上下文管理服务 (`llmcontext/`)
+管理 LLM 对话上下文，优化 token 使用。
+
+#### 核心功能
+- 压缩策略（滑动窗口、重要性采样）
+- 多种存储后端（内存、Redis）
+- 上下文窗口管理
+- 历史对话优化
+
+### 4. 检索服务 (`retriever/`)
+统一的检索接口，支持多种检索引擎。
+
+#### 支持的引擎
+- **混合检索器**: 组合多种检索策略
+- **关键词检索**: 基于关键词匹配
+- **向量检索**: 基于语义相似度
+- **图检索**: 基于知识图谱
+
+### 5. 文件存储服务 (`file/`)
+抽象的文件存储接口，支持多种存储后端。
+
+#### 存储后端
+- **本地存储**: 开发和测试环境
+- **MinIO**: 私有云对象存储
+- **腾讯云 COS**: 公有云存储
+- **虚拟存储**: 用于测试
+
+### 6. 网络搜索服务 (`web_search/`)
+集成网络搜索能力，扩展知识来源。
+
+#### 搜索引擎
+- **DuckDuckGo**: 隐私友好的搜索引擎
+- 支持自定义搜索引擎接入
+
+## 主要服务接口
+
+### 核心业务服务
+- `AgentService`: Agent 对话服务
+- `KnowledgeService`: 知识管理服务
+- `KnowledgeBaseService`: 知识库管理服务
+- `SessionService`: 会话管理服务
+- `MessageService`: 消息管理服务
+
+### 支撑服务
+- `ChunkService`: 文档分块服务
+- `ModelService`: 模型管理服务
+- `UserService`: 用户管理服务
+- `TenantService`: 租户管理服务
+- `EvaluationService`: 评估服务
+- `MCPService`: MCP 服务管理
+
+## 设计模式
+
+### 1. 策略模式
+检索器采用策略模式，支持运行时切换：
+```go
+type Retriever interface {
+    Retrieve(ctx context.Context, query *Query) ([]*Document, error)
+}
+```
+
+### 2. 装饰器模式
+流水线处理采用装饰器模式，链式调用：
+```go
+type Plugin interface {
+    OnEvent(ctx context.Context, eventType EventType, chatManage *ChatManage, next func() *PluginError) *PluginError
+}
+```
+
+### 3. 工厂模式
+上下文管理器使用工厂模式创建：
+```go
+func NewContextManager(strategy Strategy, storage Storage) ContextManager
+```
+
+## 性能优化
+
+### 1. 缓存策略
+- 检索结果缓存
+- 模型响应缓存
+- 上下文压缩缓存
+
+### 2. 并发处理
+- 并行检索
+- 流水线并行
+- 异步任务处理
+
+### 3. 资源管理
+- 连接池管理
+- 内存池复用
+- 定时清理机制
+
+## 监控与追踪
+
+### 1. 性能指标
+- 请求延迟
+- 吞吐量统计
+- 错误率追踪
+
+### 2. 业务指标
+- 检索准确率
+- 用户满意度
+- 知识覆盖率
+
+### 3. 链路追踪
+- OpenTelemetry 集成
+- 分布式追踪
+- 性能瓶颈分析
+
+## 扩展指南
+
+### 添加新服务
+1. 定义服务接口
+2. 实现业务逻辑
+3. 注册到容器
+4. 添加单元测试
+
+### 扩展流水线
+1. 实现 Plugin 接口
+2. 注册到事件管理器
+3. 配置执行顺序
+
+### 添加检索器
+1. 实现 Retriever 接口
+2. 注册到检索器注册表
+3. 配置参数映射
+
+## 测试策略
+
+### 单元测试
+- 每个服务独立测试
+- Mock 外部依赖
+- 覆盖率 > 80%
+
+### 集成测试
+- 服务间协作测试
+- 数据库集成测试
+- API 集成测试
+
+### 性能测试
+- 负载测试
+- 压力测试
+- 基准测试
+
+## 常见问题 (FAQ)
+
+### Q: 如何优化检索速度？
+A: 使用缓存、并行检索、索引优化等策略。
+
+### Q: 如何处理大文档？
+A: 使用智能分块、上下文压缩、分层检索。
+
+### Q: 如何提高评估准确性？
+A: 使用多维度评估、人工标注、A/B 测试。
+
+## 相关文件清单
+
+### 核心服务
+- `agent_service.go`: Agent 服务
+- `knowledge.go`: 知识服务
+- `session.go`: 会话服务
+- `message.go`: 消息服务
+
+### 流水线模块
+- `chat_pipeline/chat_pipline.go`: 流水线核心
+- `chat_pipeline/search.go`: 检索实现
+- `chat_pipeline/rerank.go`: 重排序
+
+### 评估模块
+- `metric/recall.go`: 召回率计算
+- `metric/precision.go`: 精确率计算
+- `metric/ndcg.go`: NDCG 计算
+
+## 变更记录 (Changelog)
+- 2025-12-05: 深度补捞，新增服务详细分析和设计模式说明
