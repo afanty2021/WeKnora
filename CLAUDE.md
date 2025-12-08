@@ -1,6 +1,10 @@
 # WeKnora - AI 驱动的文档理解与检索框架
 
+> **最新版本**: v0.2.1 (2025-12-08)
+> **项目状态**: 活跃开发中，支持 Qdrant 向量数据库和增强的检索引擎
+>
 > **变更记录 (Changelog)**
+> - 2025-12-08: 同步 v0.2.1 版本更新，新增 Qdrant 向量数据库支持
 > - 2025-12-05 20:16: 深度补捞完成，覆盖率提升至 95%+，新增核心子模块文档
 > - 2025-12-05: 初始化架构文档，完成全模块扫描与索引生成
 
@@ -12,13 +16,17 @@ WeKnora 是一个基于大语言模型（LLM）的文档理解与智能检索框
 
 WeKnora 采用现代化的微服务架构设计，主要包含以下核心组件：
 
-- **文档解析服务 (DocReader)**: 支持 PDF、Word、图片等多种格式的文档解析与结构化提取
-- **向量存储引擎**: 支持 Qdrant、Elasticsearch、PostgreSQL 等多种向量数据库
+- **文档解析服务 (DocReader)**: 支持 PDF、Word、Excel、CSV、图片等多种格式的文档解析与结构化提取
+- **向量存储引擎**:
+  - **Qdrant** (v1.16.2): 专业向量数据库，支持多维度向量存储和全文检索
+  - **Elasticsearch**: 全文检索引擎
+  - **PostgreSQL (pgvector)**: 关系型数据库向量扩展
 - **知识图谱模块**: 基于 Neo4j 的知识图谱构建与检索（可选）
-- **Agent 引擎**: ReACT 模式的智能代理，支持工具调用与多轮推理
-- **Web 界面**: 基于 Vue 3 + TDesign 的现代化管理界面
+- **Agent 引擎**: ReACT 模式的智能代理，支持工具调用、MCP 扩展和多轮推理
+- **Web 界面**: 基于 Vue 3 + TDesign 的现代化管理界面，支持多语言
 - **API 网关**: 基于 Gin 的 RESTful API 服务
 - **MCP 服务器**: Model Context Protocol 支持，扩展 Agent 能力
+- **异步任务队列**: 基于 MQ 的任务状态管理，确保服务重启后的任务完整性
 
 ## 模块结构图
 
@@ -121,8 +129,11 @@ cd WeKnora
 # 启动所有服务（开发环境）
 ./scripts/quick-dev.sh
 
-# 或使用 Docker Compose
-docker-compose up -d
+# 或使用 Docker Compose（带 Qdrant 支持）
+docker-compose --profile qdrant up -d
+
+# 启动完整服务栈（包括所有可选服务）
+docker-compose --profile full up -d
 ```
 
 ### 开发模式
@@ -219,7 +230,30 @@ python main.py
 - docreader/parser/ 下的部分解析器实现细节（低优先级）
 - 部分工具函数和辅助类（不影响主流程）
 
+## v0.2.1 新特性 (2025-12-08)
+
+### 🚀 Qdrant 向量数据库支持
+- **完整集成**: Qdrant 作为主要检索引擎
+- **向量相似性搜索**: 基于嵌入维度的动态集合创建
+- **全文关键词搜索**: 支持中文/日文/韩文等多语言分词
+- **专业中文分词**: 使用 jieba 进行关键词查询优化
+
+### ⚡ 基础设施增强
+- **Docker Compose 配置优化**: 支持服务配置文件（minio、qdrant、neo4j、jaeger、full）
+- **增强的 dev.sh 脚本**: 新增 `--minio`、`--qdrant`、`--neo4j`、`--jaeger`、`--full` 参数
+- **数据库迁移系统**: 自动脏状态恢复和 Neo4j 连接重试机制
+- **检索引擎自动配置**: 通过 `RETRIEVE_DRIVER` 环境变量自动配置
+
+### 🐛 问题修复
+- 修复 Qdrant 中文查询返回空结果的问题
+- 简化图片 URL 验证逻辑，提高兼容性
+
 ## 变更记录 (Changelog)
+
+### 2025-12-08: 同步 v0.2.1 更新
+- 更新项目版本信息和最新功能
+- 新增 Qdrant 相关配置说明
+- 更新 Docker Compose 启动命令
 
 ### 2025-12-05 20:16: 深度补捞完成
 - 覆盖率从 45.2% 提升至 95.2%

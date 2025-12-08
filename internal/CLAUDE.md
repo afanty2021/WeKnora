@@ -20,8 +20,8 @@
 ### 2. application - 应用层
 - **职责**: 业务逻辑编排，包含 repository 和 service 两层
 - **repository**: 数据访问层实现
-  - 支持 PostgreSQL、Qdrant、Elasticsearch、Neo4j 等多种存储
-  - 检索器实现（retriever）
+  - 支持 PostgreSQL、Qdrant(v1.16.2)、Elasticsearch、Neo4j 等多种存储
+  - 检索器实现（retriever），新增 Qdrant 多维度向量存储和全文检索
   - 文件存储抽象
 - **service**: 业务服务层
   - `chat_pipeline/`: 对话流水线实现
