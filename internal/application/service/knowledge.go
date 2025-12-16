@@ -1069,6 +1069,55 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 	logger.Infof(ctx, "Cleanup completed, starting to process new chunks")
 
+	// ========== DocReader 解析结果日志 ==========
+	logger.Infof(ctx, "[DocReader] ========== 解析结果概览 ==========")
+	logger.Infof(ctx, "[DocReader] 知识ID: %s, 知识库ID: %s", knowledge.ID, knowledge.KnowledgeBaseID)
+	logger.Infof(ctx, "[DocReader] 总Chunk数量: %d", len(chunks))
+
+	// 统计图片信息
+	totalImages := 0
+	chunksWithImages := 0
+	for _, chunkData := range chunks {
+		if len(chunkData.Images) > 0 {
+			chunksWithImages++
+			totalImages += len(chunkData.Images)
+		}
+	}
+	logger.Infof(ctx, "[DocReader] 包含图片的Chunk数: %d, 总图片数: %d", chunksWithImages, totalImages)
+
+	// 打印每个Chunk的详细信息
+	for idx, chunkData := range chunks {
+		contentPreview := chunkData.Content
+		if len(contentPreview) > 200 {
+			contentPreview = contentPreview[:200] + "..."
+		}
+		logger.Infof(ctx, "[DocReader] Chunk #%d (seq=%d): 内容长度=%d, 图片数=%d, 范围=[%d-%d]",
+			idx, chunkData.Seq, len(chunkData.Content), len(chunkData.Images), chunkData.Start, chunkData.End)
+		logger.Debugf(ctx, "[DocReader] Chunk #%d 内容预览: %s", idx, contentPreview)
+
+		// 打印图片详细信息
+		for imgIdx, img := range chunkData.Images {
+			logger.Infof(ctx, "[DocReader]   图片 #%d: URL=%s", imgIdx, img.Url)
+			logger.Infof(ctx, "[DocReader]   图片 #%d: OriginalURL=%s", imgIdx, img.OriginalUrl)
+			if img.Caption != "" {
+				captionPreview := img.Caption
+				if len(captionPreview) > 100 {
+					captionPreview = captionPreview[:100] + "..."
+				}
+				logger.Infof(ctx, "[DocReader]   图片 #%d: Caption=%s", imgIdx, captionPreview)
+			}
+			if img.OcrText != "" {
+				ocrPreview := img.OcrText
+				if len(ocrPreview) > 100 {
+					ocrPreview = ocrPreview[:100] + "..."
+				}
+				logger.Infof(ctx, "[DocReader]   图片 #%d: OCRText=%s", imgIdx, ocrPreview)
+			}
+			logger.Infof(ctx, "[DocReader]   图片 #%d: 位置=[%d-%d]", imgIdx, img.Start, img.End)
+		}
+	}
+	logger.Infof(ctx, "[DocReader] ========== 解析结果概览结束 ==========")
+
 	// Create chunk objects from proto chunks
 	maxSeq := 0
 
@@ -4617,6 +4666,12 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	ctx = logger.WithRequestID(ctx, payload.RequestId)
 	ctx = logger.WithField(ctx, "document_process", payload.KnowledgeID)
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+
+	// 获取任务重试信息，用于判断是否是最后一次重试
+	retryCount, _ := asynq.GetRetryCount(ctx)
+	maxRetry, _ := asynq.GetMaxRetry(ctx)
+	isLastRetry := retryCount >= maxRetry
+
 	tenantInfo, err := s.tenantRepo.GetTenantByID(ctx, payload.TenantID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get tenant: %v", err)
@@ -4624,7 +4679,8 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	logger.Infof(ctx, "Processing document task: knowledge_id=%s, file_path=%s", payload.KnowledgeID, payload.FilePath)
+	logger.Infof(ctx, "Processing document task: knowledge_id=%s, file_path=%s, retry=%d/%d",
+		payload.KnowledgeID, payload.FilePath, retryCount, maxRetry)
 
 	// 幂等性检查：获取knowledge记录
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
@@ -4739,10 +4795,13 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 			RequestId: payload.RequestId,
 		})
 		if err != nil {
-			knowledge.ParseStatus = "failed"
-			knowledge.ErrorMessage = err.Error()
-			knowledge.UpdatedAt = time.Now()
-			s.repo.UpdateKnowledge(ctx, knowledge)
+			// 如果是最后一次重试，更新状态为失败
+			if isLastRetry {
+				knowledge.ParseStatus = "failed"
+				knowledge.ErrorMessage = err.Error()
+				knowledge.UpdatedAt = time.Now()
+				s.repo.UpdateKnowledge(ctx, knowledge)
+			}
 			return fmt.Errorf("failed to read from URL: %w", err)
 		}
 		chunks = urlResp.Chunks
@@ -4773,10 +4832,13 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		if err != nil {
 			logger.GetLogger(ctx).WithField("knowledge_id", knowledge.ID).
 				WithField("error", err).Errorf("processDocument get file failed")
-			knowledge.ParseStatus = "failed"
-			knowledge.ErrorMessage = err.Error()
-			knowledge.UpdatedAt = time.Now()
-			s.repo.UpdateKnowledge(ctx, knowledge)
+			// 如果是最后一次重试，更新状态为失败
+			if isLastRetry {
+				knowledge.ParseStatus = "failed"
+				knowledge.ErrorMessage = err.Error()
+				knowledge.UpdatedAt = time.Now()
+				s.repo.UpdateKnowledge(ctx, knowledge)
+			}
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 		defer fileReader.Close()
@@ -4784,10 +4846,13 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		// 读取文件内容
 		contentBytes, err := io.ReadAll(fileReader)
 		if err != nil {
-			knowledge.ParseStatus = "failed"
-			knowledge.ErrorMessage = err.Error()
-			knowledge.UpdatedAt = time.Now()
-			s.repo.UpdateKnowledge(ctx, knowledge)
+			// 如果是最后一次重试，更新状态为失败
+			if isLastRetry {
+				knowledge.ParseStatus = "failed"
+				knowledge.ErrorMessage = err.Error()
+				knowledge.UpdatedAt = time.Now()
+				s.repo.UpdateKnowledge(ctx, knowledge)
+			}
 			return fmt.Errorf("failed to read file: %w", err)
 		}
 
@@ -4817,10 +4882,13 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 		if err != nil {
 			logger.GetLogger(ctx).WithField("knowledge_id", knowledge.ID).
 				WithField("error", err).Errorf("processDocument read file failed")
-			knowledge.ParseStatus = "failed"
-			knowledge.ErrorMessage = err.Error()
-			knowledge.UpdatedAt = time.Now()
-			s.repo.UpdateKnowledge(ctx, knowledge)
+			// 如果是最后一次重试，更新状态为失败
+			if isLastRetry {
+				knowledge.ParseStatus = "failed"
+				knowledge.ErrorMessage = err.Error()
+				knowledge.UpdatedAt = time.Now()
+				s.repo.UpdateKnowledge(ctx, knowledge)
+			}
 			return fmt.Errorf("failed to read file from docreader: %w", err)
 		}
 		chunks = fileResp.Chunks
@@ -4847,6 +4915,11 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	ctx = logger.WithField(ctx, "faq_import", payload.TaskID)
 	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
 
+	// 获取任务重试信息，用于判断是否是最后一次重试
+	retryCount, _ := asynq.GetRetryCount(ctx)
+	maxRetry, _ := asynq.GetMaxRetry(ctx)
+	isLastRetry := retryCount >= maxRetry
+
 	tenantInfo, err := s.tenantRepo.GetTenantByID(ctx, payload.TenantID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get tenant: %v", err)
@@ -4854,8 +4927,8 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	}
 	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
 
-	logger.Infof(ctx, "Processing FAQ import task: task_id=%s, kb_id=%s, total_entries=%d",
-		payload.TaskID, payload.KBID, len(payload.Entries))
+	logger.Infof(ctx, "Processing FAQ import task: task_id=%s, kb_id=%s, total_entries=%d, retry=%d/%d",
+		payload.TaskID, payload.KBID, len(payload.Entries), retryCount, maxRetry)
 
 	// 幂等性检查：获取knowledge记录（FAQ任务使用knowledge ID作为taskID）
 	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.TaskID)
@@ -4871,6 +4944,12 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, payload.KBID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to get knowledge base: %v", err)
+		// 如果是最后一次重试，更新状态为失败
+		if isLastRetry {
+			if updateErr := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, len(payload.Entries), 0, err.Error()); updateErr != nil {
+				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
+			}
+		}
 		return fmt.Errorf("failed to get knowledge base: %w", err)
 	}
 
@@ -4897,6 +4976,12 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 		chunksDeleted, err := s.chunkRepo.DeleteUnindexedChunks(ctx, payload.TenantID, payload.KnowledgeID)
 		if err != nil {
 			logger.Errorf(ctx, "Failed to delete unindexed chunks: %v", err)
+			// 如果是最后一次重试，更新状态为失败
+			if isLastRetry {
+				if updateErr := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, originalTotalEntries, processedCount, err.Error()); updateErr != nil {
+					logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
+				}
+			}
 			return fmt.Errorf("failed to delete unindexed chunks: %w", err)
 		}
 		logger.Infof(ctx, "Deleted unindexed chunks: %d", len(chunksDeleted))
@@ -4949,6 +5034,18 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	// 执行FAQ导入
 	if err := s.executeFAQImport(ctx, payload.TaskID, payload.KBID, faqPayload, payload.TenantID, originalTotalEntries-len(payload.Entries)); err != nil {
 		logger.Errorf(ctx, "FAQ import task failed: %s, error: %v", payload.TaskID, err)
+		// 如果是最后一次重试，更新状态为失败
+		if isLastRetry {
+			// 获取当前已处理的进度
+			currentMeta, _ := types.ParseFAQImportMetadata(knowledge)
+			currentProcessed := 0
+			if currentMeta != nil {
+				currentProcessed = currentMeta.ImportProcessed
+			}
+			if updateErr := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, originalTotalEntries, currentProcessed, err.Error()); updateErr != nil {
+				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
+			}
+		}
 		return fmt.Errorf("FAQ import failed: %w", err)
 	}
 
