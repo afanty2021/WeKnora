@@ -115,6 +115,19 @@ func (c *CompositeRetrieveEngine) BatchUpdateChunkEnabledStatus(
 	})
 }
 
+// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+func (c *CompositeRetrieveEngine) BatchUpdateChunkTagID(
+	ctx context.Context,
+	chunkTagMap map[string]string,
+) error {
+	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
+		if err := engineInfo.retrieveEngine.BatchUpdateChunkTagID(ctx, chunkTagMap); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // concurrentRetrieve is a helper function for concurrent processing of retrieval parameters
 // and collecting results
 func concurrentRetrieve(
@@ -234,10 +247,10 @@ func (c *CompositeRetrieveEngine) BatchIndex(ctx context.Context,
 
 // DeleteByChunkIDList deletes vector embeddings by chunk ID list from all registered repositories
 func (c *CompositeRetrieveEngine) DeleteByChunkIDList(ctx context.Context,
-	chunkIDList []string, dimension int,
+	chunkIDList []string, dimension int, knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.DeleteByChunkIDList(ctx, chunkIDList, dimension); err != nil {
+		if err := engineInfo.retrieveEngine.DeleteByChunkIDList(ctx, chunkIDList, dimension, knowledgeType); err != nil {
 			logger.GetLogger(ctx).Errorf("Repository %s failed to delete chunk ID list: %v",
 				engineInfo.retrieveEngine.EngineType(), err)
 			return err
@@ -248,10 +261,10 @@ func (c *CompositeRetrieveEngine) DeleteByChunkIDList(ctx context.Context,
 
 // DeleteBySourceIDList deletes vector embeddings by source ID list from all registered repositories
 func (c *CompositeRetrieveEngine) DeleteBySourceIDList(ctx context.Context,
-	sourceIDList []string, dimension int,
+	sourceIDList []string, dimension int, knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.DeleteBySourceIDList(ctx, sourceIDList, dimension); err != nil {
+		if err := engineInfo.retrieveEngine.DeleteBySourceIDList(ctx, sourceIDList, dimension, knowledgeType); err != nil {
 			logger.GetLogger(ctx).Errorf("Repository %s failed to delete source ID list: %v",
 				engineInfo.retrieveEngine.EngineType(), err)
 			return err
@@ -268,6 +281,7 @@ func (c *CompositeRetrieveEngine) CopyIndices(
 	sourceToTargetKBIDMap map[string]string,
 	sourceToTargetChunkIDMap map[string]string,
 	dimension int,
+	knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
 		if err := engineInfo.retrieveEngine.CopyIndices(
@@ -277,6 +291,7 @@ func (c *CompositeRetrieveEngine) CopyIndices(
 			sourceToTargetChunkIDMap,
 			targetKnowledgeBaseID,
 			dimension,
+			knowledgeType,
 		); err != nil {
 			logger.Errorf(ctx, "Repository %s failed to copy indices: %v", engineInfo.retrieveEngine.EngineType(), err)
 			return err
@@ -287,10 +302,10 @@ func (c *CompositeRetrieveEngine) CopyIndices(
 
 // DeleteByKnowledgeIDList deletes vector embeddings by knowledge ID list from all registered repositories
 func (c *CompositeRetrieveEngine) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int,
+	knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
 	return c.concurrentExecWithError(ctx, func(ctx context.Context, engineInfo *engineInfo) error {
-		if err := engineInfo.retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDList, dimension); err != nil {
+		if err := engineInfo.retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDList, dimension, knowledgeType); err != nil {
 			logger.GetLogger(ctx).Errorf("Repository %s failed to delete knowledge ID list: %v",
 				engineInfo.retrieveEngine.EngineType(), err)
 			return err

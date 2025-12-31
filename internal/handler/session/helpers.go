@@ -12,6 +12,23 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// convertMentionedItems converts MentionedItemRequest slice to types.MentionedItems
+func convertMentionedItems(items []MentionedItemRequest) types.MentionedItems {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make(types.MentionedItems, len(items))
+	for i, item := range items {
+		result[i] = types.MentionedItem{
+			ID:     item.ID,
+			Name:   item.Name,
+			Type:   item.Type,
+			KBType: item.KBType,
+		}
+	}
+	return result
+}
+
 // setSSEHeaders sets the standard Server-Sent Events headers
 func setSSEHeaders(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
@@ -77,14 +94,15 @@ func createAgentQueryEvent(sessionID, assistantMessageID string) interfaces.Stre
 }
 
 // createUserMessage creates a user message
-func (h *Handler) createUserMessage(ctx context.Context, sessionID, query, requestID string) error {
+func (h *Handler) createUserMessage(ctx context.Context, sessionID, query, requestID string, mentionedItems types.MentionedItems) error {
 	_, err := h.messageService.CreateMessage(ctx, &types.Message{
-		SessionID:   sessionID,
-		Role:        "user",
-		Content:     query,
-		RequestID:   requestID,
-		CreatedAt:   time.Now(),
-		IsCompleted: true,
+		SessionID:      sessionID,
+		Role:           "user",
+		Content:        query,
+		RequestID:      requestID,
+		CreatedAt:      time.Now(),
+		IsCompleted:    true,
+		MentionedItems: mentionedItems,
 	})
 	return err
 }
@@ -185,20 +203,13 @@ func (h *Handler) createDefaultSummaryConfig(ctx context.Context) *types.Summary
 
 	// Override with tenant-level conversation config if available
 	if tenant != nil && tenant.ConversationConfig != nil {
-		useSystemPrompt := tenant.ConversationConfig.UseCustomSystemPrompt
-		if !useSystemPrompt && tenant.ConversationConfig.Prompt != "" {
-			// Backward compatibility: treat legacy configs without flag as custom
-			useSystemPrompt = true
-		}
-		if useSystemPrompt && tenant.ConversationConfig.Prompt != "" {
+		// Use custom prompt if provided
+		if tenant.ConversationConfig.Prompt != "" {
 			cfg.Prompt = tenant.ConversationConfig.Prompt
 		}
 
-		useContextTemplate := tenant.ConversationConfig.UseCustomContextTemplate
-		if !useContextTemplate && tenant.ConversationConfig.ContextTemplate != "" {
-			useContextTemplate = true
-		}
-		if useContextTemplate && tenant.ConversationConfig.ContextTemplate != "" {
+		// Use custom context template if provided
+		if tenant.ConversationConfig.ContextTemplate != "" {
 			cfg.ContextTemplate = tenant.ConversationConfig.ContextTemplate
 		}
 		if tenant.ConversationConfig.Temperature > 0 {
@@ -224,13 +235,13 @@ func (h *Handler) fillSummaryConfigDefaults(ctx context.Context, config *types.S
 	var defaultMaxCompletionTokens int
 
 	if tenant != nil && tenant.ConversationConfig != nil {
-		useSystemPrompt := tenant.ConversationConfig.UseCustomSystemPrompt
-		if useSystemPrompt && tenant.ConversationConfig.Prompt != "" {
+		// Use custom prompt if provided
+		if tenant.ConversationConfig.Prompt != "" {
 			defaultPrompt = tenant.ConversationConfig.Prompt
 		}
 
-		useContextTemplate := tenant.ConversationConfig.UseCustomContextTemplate
-		if useContextTemplate && tenant.ConversationConfig.ContextTemplate != "" {
+		// Use custom context template if provided
+		if tenant.ConversationConfig.ContextTemplate != "" {
 			defaultContextTemplate = tenant.ConversationConfig.ContextTemplate
 		}
 		defaultTemperature = tenant.ConversationConfig.Temperature

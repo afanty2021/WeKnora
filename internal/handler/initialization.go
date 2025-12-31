@@ -205,7 +205,20 @@ type InitializationRequest struct {
 	} `json:"questionGeneration"`
 }
 
-// UpdateKBConfig 根据知识库ID和模型ID更新配置（简化版）
+// UpdateKBConfig godoc
+// @Summary      更新知识库配置
+// @Description  根据知识库ID更新模型和分块配置
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        kbId     path      string               true  "知识库ID"
+// @Param        request  body      KBModelConfigRequest true  "配置请求"
+// @Success      200      {object}  map[string]interface{}  "更新成功"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Failure      404      {object}  errors.AppError         "知识库不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/kb/{kbId}/config [put]
 func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 	kbIdStr := utils.SanitizeForLog(c.Param("kbId"))
@@ -374,7 +387,19 @@ func (h *InitializationHandler) UpdateKBConfig(c *gin.Context) {
 	})
 }
 
-// InitializeByKB 根据知识库ID执行配置更新
+// InitializeByKB godoc
+// @Summary      初始化知识库配置
+// @Description  根据知识库ID执行完整配置更新
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        kbId     path      string  true  "知识库ID"
+// @Param        request  body      object  true  "初始化请求"
+// @Success      200      {object}  map[string]interface{}  "初始化成功"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/kb/{kbId} [post]
 func (h *InitializationHandler) InitializeByKB(c *gin.Context) {
 	ctx := c.Request.Context()
 	kbIdStr := utils.SanitizeForLog(c.Param("kbId"))
@@ -765,7 +790,14 @@ func extractModelIDs(processedModels []*types.Model) (embeddingModelID, llmModel
 	return
 }
 
-// CheckOllamaStatus 检查Ollama服务状态
+// CheckOllamaStatus godoc
+// @Summary      检查Ollama服务状态
+// @Description  检查Ollama服务是否可用
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "Ollama状态"
+// @Router       /initialization/ollama/status [get]
 func (h *InitializationHandler) CheckOllamaStatus(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -809,7 +841,18 @@ func (h *InitializationHandler) CheckOllamaStatus(c *gin.Context) {
 	})
 }
 
-// CheckOllamaModels 检查Ollama模型状态
+// CheckOllamaModels godoc
+// @Summary      检查Ollama模型状态
+// @Description  检查指定的Ollama模型是否已安装
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      object{models=[]string}  true  "模型名称列表"
+// @Success      200      {object}  map[string]interface{}   "模型状态"
+// @Failure      400      {object}  errors.AppError          "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/ollama/models/check [post]
 func (h *InitializationHandler) CheckOllamaModels(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -860,7 +903,18 @@ func (h *InitializationHandler) CheckOllamaModels(c *gin.Context) {
 	})
 }
 
-// DownloadOllamaModel 异步下载Ollama模型
+// DownloadOllamaModel godoc
+// @Summary      下载Ollama模型
+// @Description  异步下载指定的Ollama模型
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      object{modelName=string}  true  "模型名称"
+// @Success      200      {object}  map[string]interface{}    "下载任务信息"
+// @Failure      400      {object}  errors.AppError           "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/ollama/models/download [post]
 func (h *InitializationHandler) DownloadOllamaModel(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -961,7 +1015,18 @@ func (h *InitializationHandler) DownloadOllamaModel(c *gin.Context) {
 	})
 }
 
-// GetDownloadProgress 获取下载进度
+// GetDownloadProgress godoc
+// @Summary      获取下载进度
+// @Description  获取Ollama模型下载任务的进度
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        taskId  path      string  true  "任务ID"
+// @Success      200     {object}  map[string]interface{}  "下载进度"
+// @Failure      404     {object}  errors.AppError         "任务不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/ollama/download/{taskId} [get]
 func (h *InitializationHandler) GetDownloadProgress(c *gin.Context) {
 	taskID := c.Param("taskId")
 
@@ -985,7 +1050,16 @@ func (h *InitializationHandler) GetDownloadProgress(c *gin.Context) {
 	})
 }
 
-// ListDownloadTasks 列出所有下载任务
+// ListDownloadTasks godoc
+// @Summary      列出下载任务
+// @Description  列出所有Ollama模型下载任务
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "任务列表"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/ollama/download/tasks [get]
 func (h *InitializationHandler) ListDownloadTasks(c *gin.Context) {
 	tasksMutex.RLock()
 	tasks := make([]*DownloadTask, 0, len(downloadTasks))
@@ -1000,7 +1074,17 @@ func (h *InitializationHandler) ListDownloadTasks(c *gin.Context) {
 	})
 }
 
-// ListOllamaModels 列出已安装的 Ollama 模型
+// ListOllamaModels godoc
+// @Summary      列出Ollama模型
+// @Description  列出已安装的Ollama模型
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "模型列表"
+// @Failure      500  {object}  errors.AppError         "服务器错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/ollama/models [get]
 func (h *InitializationHandler) ListOllamaModels(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1128,7 +1212,18 @@ func (h *InitializationHandler) updateTaskStatus(
 	}
 }
 
-// GetCurrentConfigByKB 根据知识库ID获取配置信息
+// GetCurrentConfigByKB godoc
+// @Summary      获取知识库配置
+// @Description  根据知识库ID获取当前配置信息
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        kbId  path      string  true  "知识库ID"
+// @Success      200   {object}  map[string]interface{}  "配置信息"
+// @Failure      404   {object}  errors.AppError         "知识库不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/kb/{kbId}/config [get]
 func (h *InitializationHandler) GetCurrentConfigByKB(c *gin.Context) {
 	ctx := c.Request.Context()
 	kbIdStr := utils.SanitizeForLog(c.Param("kbId"))
@@ -1332,7 +1427,18 @@ type RemoteModelCheckRequest struct {
 	APIKey    string `json:"apiKey"`
 }
 
-// CheckRemoteModel 检查远程API模型连接
+// CheckRemoteModel godoc
+// @Summary      检查远程模型
+// @Description  检查远程API模型连接是否正常
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      RemoteModelCheckRequest  true  "模型检查请求"
+// @Success      200      {object}  map[string]interface{}   "检查结果"
+// @Failure      400      {object}  errors.AppError          "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/models/remote/check [post]
 func (h *InitializationHandler) CheckRemoteModel(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1377,7 +1483,18 @@ func (h *InitializationHandler) CheckRemoteModel(c *gin.Context) {
 	})
 }
 
-// TestEmbeddingModel 测试 Embedding 接口（本地或远程）是否可用
+// TestEmbeddingModel godoc
+// @Summary      测试Embedding模型
+// @Description  测试Embedding接口是否可用并返回向量维度
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      object  true  "Embedding测试请求"
+// @Success      200      {object}  map[string]interface{}  "测试结果"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/models/embedding/test [post]
 func (h *InitializationHandler) TestEmbeddingModel(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1389,12 +1506,30 @@ func (h *InitializationHandler) TestEmbeddingModel(c *gin.Context) {
 		BaseURL   string `json:"baseUrl"`
 		APIKey    string `json:"apiKey"`
 		Dimension int    `json:"dimension"`
+		Provider  string `json:"provider"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Error(ctx, "Failed to parse embedding test request", err)
 		c.Error(errors.NewBadRequestError(err.Error()))
 		return
+	}
+
+	// 检查是否是阿里云多模态 embedding 模型（暂不支持）
+	if strings.ToLower(req.Provider) == "aliyun" {
+		modelNameLower := strings.ToLower(req.ModelName)
+		if strings.Contains(modelNameLower, "vision") || strings.Contains(modelNameLower, "multimodal") {
+			logger.Infof(ctx, "Aliyun multimodal embedding model not supported: %s", req.ModelName)
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"data": gin.H{
+					"available": false,
+					"message":   "阿里云多模态 Embedding 模型暂不支持，请使用纯文本 Embedding 模型（如 text-embedding-v4）",
+					"dimension": 0,
+				},
+			})
+			return
+		}
 	}
 
 	// 构造 embedder 配置
@@ -1406,6 +1541,7 @@ func (h *InitializationHandler) TestEmbeddingModel(c *gin.Context) {
 		TruncatePromptTokens: 256,
 		Dimensions:           req.Dimension,
 		ModelID:              "",
+		Provider:             req.Provider,
 	}
 
 	emb, err := embedding.NewEmbedder(cfg)
@@ -1478,7 +1614,7 @@ func (h *InitializationHandler) checkRemoteModelConnection(ctx context.Context,
 		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "unauthorized") {
 			return false, "认证失败，请检查API Key"
 		} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "forbidden") {
-			return false, "权限不足，请检查API Key权限"
+			return false, "权限不足，请检查API Key权限：" + err.Error()
 		} else if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
 			return false, "API端点不存在，请检查Base URL"
 		} else if strings.Contains(err.Error(), "timeout") {
@@ -1530,7 +1666,18 @@ func (h *InitializationHandler) checkRerankModelConnection(ctx context.Context,
 	}
 }
 
-// CheckRerankModel 检查Rerank模型连接和功能
+// CheckRerankModel godoc
+// @Summary      检查Rerank模型
+// @Description  检查Rerank模型连接和功能是否正常
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      object  true  "Rerank检查请求"
+// @Success      200      {object}  map[string]interface{}  "检查结果"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/models/rerank/check [post]
 func (h *InitializationHandler) CheckRerankModel(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1598,7 +1745,23 @@ type testMultimodalForm struct {
 	SeparatorsRaw string `form:"separators"`
 }
 
-// TestMultimodalFunction 测试多模态功能
+// TestMultimodalFunction godoc
+// @Summary      测试多模态功能
+// @Description  上传图片测试多模态处理功能
+// @Tags         初始化
+// @Accept       multipart/form-data
+// @Produce      json
+// @Param        image             formData  file    true   "测试图片"
+// @Param        vlm_model         formData  string  true   "VLM模型名称"
+// @Param        vlm_base_url      formData  string  true   "VLM Base URL"
+// @Param        vlm_api_key       formData  string  false  "VLM API Key"
+// @Param        vlm_interface_type formData string  false  "VLM接口类型"
+// @Param        storage_type      formData  string  true   "存储类型(cos/minio)"
+// @Success      200               {object}  map[string]interface{}  "测试结果"
+// @Failure      400               {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/multimodal/test [post]
 func (h *InitializationHandler) TestMultimodalFunction(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1660,10 +1823,11 @@ func (h *InitializationHandler) TestMultimodalFunction(c *gin.Context) {
 		return
 	}
 
-	// 验证文件大小 (10MB)
-	if header.Size > 10*1024*1024 {
+	// 验证文件大小 (default 50MB, configurable via MAX_FILE_SIZE_MB)
+	maxSize := utils.GetMaxFileSize()
+	if header.Size > maxSize {
 		logger.Error(ctx, "File size too large")
-		c.Error(errors.NewBadRequestError("图片文件大小不能超过10MB"))
+		c.Error(errors.NewBadRequestError(fmt.Sprintf("图片文件大小不能超过%dMB", utils.GetMaxFileSizeMB())))
 		return
 	}
 	logger.Infof(ctx, "Processing image: %s", utils.SanitizeForLog(header.Filename))
@@ -1857,7 +2021,18 @@ type TextRelationExtractionResponse struct {
 	Relations []*types.GraphRelation `json:"relations"`
 }
 
-// ExtractTextRelations extracts text relations from text
+// ExtractTextRelations godoc
+// @Summary      提取文本关系
+// @Description  从文本中提取实体和关系
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      TextRelationExtractionRequest  true  "提取请求"
+// @Success      200      {object}  map[string]interface{}         "提取结果"
+// @Failure      400      {object}  errors.AppError                "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/extract/relations [post]
 func (h *InitializationHandler) ExtractTextRelations(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -1951,7 +2126,18 @@ type FabriTextResponse struct {
 	Text string `json:"text"`
 }
 
-// FabriText generates example text
+// FabriText godoc
+// @Summary      生成示例文本
+// @Description  根据标签生成示例文本
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Param        request  body      FabriTextRequest  true  "生成请求"
+// @Success      200      {object}  map[string]interface{}  "生成的文本"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /initialization/fabri/text [post]
 func (h *InitializationHandler) FabriText(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -2024,7 +2210,14 @@ var tagOptions = []string{
 	"内容", "文化", "人物", "事件", "时间", "地点", "作品", "作者", "关系", "属性",
 }
 
-// FabriTag generates tags
+// FabriTag godoc
+// @Summary      生成随机标签
+// @Description  随机生成一组标签
+// @Tags         初始化
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "生成的标签"
+// @Router       /initialization/fabri/tag [get]
 func (h *InitializationHandler) FabriTag(c *gin.Context) {
 	tagRandom := RandomSelect(tagOptions, rand.Intn(len(tagOptions)-1)+1)
 	c.JSON(http.StatusOK, gin.H{

@@ -22,7 +22,7 @@
         <img src="https://img.shields.io/badge/License-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" alt="License">
     </a>
     <a href="./CHANGELOG.md">
-        <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-2e6cc4?labelColor=d4eaf7">
+        <img alt="Version" src="https://img.shields.io/badge/version-0.2.6-2e6cc4?labelColor=d4eaf7">
     </a>
 </p>
 
@@ -323,7 +323,7 @@ Please refer to the [MCP Configuration Guide](./mcp-server/MCP_CONFIG.md) for th
 
 Troubleshooting FAQ: [Troubleshooting FAQ](./docs/QA.md)
 
-Detailed API documentation is available at: [API Docs](./docs/API.md)
+Detailed API documentation is available at: [API Docs](./docs/api/README.md)
 
 ## 🧭 Developer Guide
 

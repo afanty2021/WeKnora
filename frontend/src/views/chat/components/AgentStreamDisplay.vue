@@ -36,9 +36,8 @@
               'thinking-last': isLastThinking(event.event_id)
             }"
           >
-            <div v-if="event.content" 
-                 class="thinking-content markdown-content" 
-                 v-html="renderMarkdown(event.content)">
+            <div v-if="event.content" class="thinking-content markdown-content">
+                 <div v-for="(token, idx) in getTokens(event.content)" :key="idx" v-html="getTokenHTML(token)"></div>
             </div>
           </div>
         </div>
@@ -53,8 +52,8 @@
               'answer-done': event.done
             }"
           >
-            <div class="answer-content markdown-content" 
-                 v-html="renderMarkdown(event.content)">
+            <div class="answer-content markdown-content">
+                 <div v-for="(token, idx) in getTokens(event.content)" :key="idx" v-html="getTokenHTML(token)"></div>
             </div>
           </div>
           <div v-if="event.done" class="answer-toolbar">
@@ -126,7 +125,9 @@
             <!-- Thinking tool: only render markdown thought content -->
             <template v-if="event.tool_name === 'thinking' && event.tool_data?.thought">
               <div class="thinking-thought-content">
-                <div class="thinking-thought-markdown markdown-content" v-html="renderMarkdown(event.tool_data.thought)"></div>
+                <div class="thinking-thought-markdown markdown-content">
+                  <div v-for="(token, idx) in getTokens(event.tool_data.thought)" :key="idx" v-html="getTokenHTML(token)"></div>
+                </div>
               </div>
             </template>
             
@@ -1069,92 +1070,112 @@ const parseTagAttributes = (attrString: string): Record<string, string> => {
   return attributes;
 };
 
-// Markdown rendering function
-const renderMarkdown = (content: any): string => {
-  if (!content) return '';
+// Preprocess markdown to handle incomplete images and custom citations
+const preprocessMarkdown = (contentStr: string): string => {
+  if (!contentStr.trim()) return '';
+
+  // Handle streaming image syntax to prevent flickering
+  const lastImgStart = contentStr.lastIndexOf('![');
+  if (lastImgStart !== -1) {
+    const potentialImgTag = contentStr.slice(lastImgStart);
+    const hasClosingParen = potentialImgTag.includes(')');
+    const hasClosingBracket = potentialImgTag.includes(']');
+    
+    if (!hasClosingBracket || !hasClosingParen) {
+       contentStr = contentStr.slice(0, lastImgStart);
+    }
+  }
+
+  // Preprocess custom citation tags
+  return contentStr
+    .replace(
+      /<web\b([^>]*)\/>/g,
+      (_m: string, attrString: string) => {
+        const attrs = parseTagAttributes(attrString);
+        const url = attrs.url || '';
+        const title = attrs.title || '';
+
+        if (!url) return '';
+
+        let domain = url;
+        try {
+          const u = new URL(url);
+          const host = u.hostname || '';
+          const parts = host.split('.');
+          if (parts.length >= 2) {
+            domain = parts.slice(-2).join('.');
+          } else {
+            domain = host || url;
+          }
+        } catch {
+          // keep original url text if parsing fails
+        }
+        const safeTitle = String(title || '').replace(/"/g, '&quot;');
+        const safeUrl = String(url || '').replace(/"/g, '&quot;');
+        const tipTitle = safeTitle || '';
+        const tipUrl = safeUrl || '';
+        return `<a class="citation citation-web" data-url="${safeUrl}" href="${safeUrl}" target="_blank" rel="noopener noreferrer"><span class="citation-icon web"></span><span class="citation-domain">${domain}</span><span class="citation-tip"><span class="tip-title">${tipTitle}</span><span class="tip-url">${tipUrl}</span></span></a>`;
+      }
+    )
+    .replace(
+      /<kb\b([^>]*)\/>/g,
+      (_m, attrString: string) => {
+        const attrs = parseTagAttributes(attrString);
+        const doc = attrs.doc || '';
+        const chunkId = attrs.chunk_id || attrs.chunkId || '';
+        const kbId = attrs.kb_id || attrs.kbId || '';
+
+        if (!doc || !chunkId) return '';
+
+        const safeDoc = escapeHtml(doc);
+        const safeKbId = escapeHtml(kbId);
+        const safeChunkId = escapeHtml(chunkId);
+
+        const truncateMiddle = (text: string, maxLength = 13): string => {
+          if (!text) return '';
+          if (text.length <= maxLength) return text;
+          const half = Math.floor((maxLength - 3) / 2);
+          const start = text.slice(0, half + ((maxLength - 3) % 2));
+          const end = text.slice(-half);
+          return `${start}...${end}`;
+        };
+
+        const displayDoc = escapeHtml(truncateMiddle(doc));
+        return `<span class="citation citation-kb" data-kb-id="${safeKbId}" data-chunk-id="${safeChunkId}" data-doc="${safeDoc}" role="button" tabindex="0"><span class="citation-icon kb"></span><span class="citation-text">${displayDoc}</span><span class="citation-tip"><span class="t-popup__content"><span class="tip-loading">加载中...</span></span></span></span>`;
+      }
+    );
+};
+
+// Get tokens from markdown content
+const getTokens = (content: any) => {
+  const contentStr = typeof content === 'string' ? content : String(content || '');
+  if (!contentStr.trim()) return [];
   
-  // Ensure content is a string
+  const processed = preprocessMarkdown(contentStr);
+  return marked.lexer(processed);
+};
+
+// Render HTML from a single token
+const getTokenHTML = (token: any): string => {
+  try {
+    const html = marked.parser([token]);
+    return DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 'code', 'pre', 'ul', 'ol', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'span', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'img', 'figure', 'figcaption'],
+      ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'data-tooltip', 'data-url', 'data-kb-id', 'data-chunk-id', 'data-doc', 'class', 'role', 'tabindex', 'src', 'alt', 'width', 'height', 'style']
+    });
+  } catch (e) {
+    console.error('Token rendering error:', e);
+    return '';
+  }
+};
+
+// Legacy Markdown rendering function (kept for summaries)
+const renderMarkdown = (content: any): string => {
   const contentStr = typeof content === 'string' ? content : String(content || '');
   if (!contentStr.trim()) return '';
   
   try {
-    // Preprocess custom citation tags into safe HTML the sanitizer will allow
-    // Supported formats:
-    //   <kb kb_id="..." doc="..." chunk_id="..." />
-    //   <web url="https://..." title="Example" />
-    const processed = contentStr
-      // Web citations -> compact clickable badges with domain text; hover shows title via native tooltip
-      .replace(
-        /<web\b([^>]*)\/>/g,
-        (_m: string, attrString: string) => {
-          const attrs = parseTagAttributes(attrString);
-          const url = attrs.url || '';
-          const title = attrs.title || '';
-
-          if (!url) {
-            return '';
-          }
-
-          // Extract domain for compact display
-          let domain = url;
-          try {
-            const u = new URL(url);
-            const host = u.hostname || '';
-            const parts = host.split('.');
-            if (parts.length >= 2) {
-              // prefer second-level domain: last two labels
-              domain = parts.slice(-2).join('.');
-            } else {
-              domain = host || url;
-            }
-          } catch {
-            // keep original url text if parsing fails
-          }
-          // Escape double quotes in title for attribute safety
-          const safeTitle = String(title || '').replace(/"/g, '&quot;');
-          const safeUrl = String(url || '').replace(/"/g, '&quot;');
-          // Render with embedded tooltip blocks to allow styled parts (bold title)
-          const tipTitle = safeTitle || '';
-          const tipUrl = safeUrl || '';
-          // Keep lightweight tooltip (no t-popup container) to avoid global popup styling
-          return `<a class="citation citation-web" data-url="${safeUrl}" href="${safeUrl}" target="_blank" rel="noopener noreferrer"><span class="citation-icon web"></span><span class="citation-domain">${domain}</span><span class="citation-tip"><span class="tip-title">${tipTitle}</span><span class="tip-url">${tipUrl}</span></span></a>`;
-        }
-      )
-      // KB citations -> inline badges with simplified display
-      .replace(
-        /<kb\b([^>]*)\/>/g,
-        (_m, attrString: string) => {
-          const attrs = parseTagAttributes(attrString);
-          const doc = attrs.doc || '';
-          const chunkId = attrs.chunk_id || attrs.chunkId || '';
-          const kbId = attrs.kb_id || attrs.kbId || '';
-
-          if (!doc || !chunkId) {
-            return '';
-          }
-
-          // Escape attributes for safety
-          const safeDoc = escapeHtml(doc);
-          const safeKbId = escapeHtml(kbId);
-          const safeChunkId = escapeHtml(chunkId);
-
-          const truncateMiddle = (text: string, maxLength = 13): string => {
-            if (!text) return '';
-            if (text.length <= maxLength) return text;
-            const half = Math.floor((maxLength - 3) / 2);
-            const start = text.slice(0, half + ((maxLength - 3) % 2));
-            const end = text.slice(-half);
-            return `${start}...${end}`;
-          };
-
-          const displayDoc = escapeHtml(truncateMiddle(doc));
-          console.log('displayDoc', displayDoc);
-
-          // Initial tooltip content (single t-popup container; will be updated on hover)
-          return `<span class="citation citation-kb" data-kb-id="${safeKbId}" data-chunk-id="${safeChunkId}" data-doc="${safeDoc}" role="button" tabindex="0"><span class="citation-icon kb"></span><span class="citation-text">${displayDoc}</span><span class="citation-tip"><span class="t-popup__content"><span class="tip-loading">加载中...</span></span></span></span>`;
-        }
-      );
-
+    const processed = preprocessMarkdown(contentStr);
     const html = marked.parse(processed) as string;
     if (!html) return '';
     
@@ -1164,7 +1185,6 @@ const renderMarkdown = (content: any): string => {
     });
   } catch (e) {
     console.error('Markdown rendering error:', e, 'Content:', contentStr.substring(0, 100));
-    // Return escaped HTML instead of raw content for safety
     return contentStr.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 };
@@ -1926,6 +1946,7 @@ const handleAddToKnowledge = (answerEvent: any) => {
         max-height: 300px;
         width: auto;
         height: auto;
+        min-height: 100px; /* 防止流式输出时图片高度塌陷导致抖动 */
         border-radius: 8px;
         display: block;
         margin: 8px 0;
@@ -1933,6 +1954,7 @@ const handleAddToKnowledge = (answerEvent: any) => {
         object-fit: contain;
         cursor: pointer;
         transition: transform 0.2s ease;
+        background-color: #f9fafb; /* 加载时的占位背景色 */
         
         &:hover {
           transform: scale(1.02);
@@ -2058,6 +2080,7 @@ const handleAddToKnowledge = (answerEvent: any) => {
         max-height: 300px;
         width: auto;
         height: auto;
+        min-height: 100px; /* 防止流式输出时图片高度塌陷导致抖动 */
         border-radius: 8px;
         display: block;
         margin: 8px 0;
@@ -2065,6 +2088,7 @@ const handleAddToKnowledge = (answerEvent: any) => {
         object-fit: contain;
         cursor: pointer;
         transition: transform 0.2s ease;
+        background-color: #f9fafb; /* 加载时的占位背景色 */
         
         &:hover {
           transform: scale(1.02);

@@ -25,6 +25,7 @@ const (
 	fieldChunkID          = "chunk_id"
 	fieldKnowledgeID      = "knowledge_id"
 	fieldKnowledgeBaseID  = "knowledge_base_id"
+	fieldTagID            = "tag_id"
 	fieldEmbedding        = "embedding"
 	fieldIsEnabled        = "is_enabled"
 )
@@ -264,7 +265,7 @@ func (q *qdrantRepository) BatchSave(ctx context.Context,
 }
 
 // DeleteByChunkIDList removes points from the collection based on chunk IDs
-func (q *qdrantRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int) error {
+func (q *qdrantRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
 	log := logger.GetLogger(ctx)
 	if len(chunkIDList) == 0 {
 		log.Warn("[Qdrant] Empty chunk ID list provided for deletion, skipping")
@@ -293,7 +294,7 @@ func (q *qdrantRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList 
 
 // DeleteByKnowledgeIDList removes points from the collection based on knowledge IDs
 func (q *qdrantRepository) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int,
+	knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
 	log := logger.GetLogger(ctx)
 	if len(knowledgeIDList) == 0 {
@@ -323,7 +324,7 @@ func (q *qdrantRepository) DeleteByKnowledgeIDList(ctx context.Context,
 
 // DeleteBySourceIDList removes points from the collection based on source IDs
 func (q *qdrantRepository) DeleteBySourceIDList(ctx context.Context,
-	sourceIDList []string, dimension int,
+	sourceIDList []string, dimension int, knowledgeType string,
 ) error {
 	log := logger.GetLogger(ctx)
 	if len(sourceIDList) == 0 {
@@ -426,6 +427,58 @@ func (q *qdrantRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, ch
 	return nil
 }
 
+// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+func (q *qdrantRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error {
+	log := logger.GetLogger(ctx)
+	if len(chunkTagMap) == 0 {
+		log.Warn("[Qdrant] Empty chunk tag map provided, skipping")
+		return nil
+	}
+
+	log.Infof("[Qdrant] Batch updating chunk tag ID, count: %d", len(chunkTagMap))
+
+	// Get all collections that match our base name pattern
+	collections, err := q.client.ListCollections(ctx)
+	if err != nil {
+		log.Errorf("[Qdrant] Failed to list collections: %v", err)
+		return fmt.Errorf("failed to list collections: %w", err)
+	}
+
+	// Group chunks by tag ID for batch updates
+	tagGroups := make(map[string][]string)
+	for chunkID, tagID := range chunkTagMap {
+		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
+	}
+
+	// Update in all matching collections
+	for _, collectionName := range collections {
+		// Only process collections that start with our base name
+		if len(collectionName) <= len(q.collectionBaseName) ||
+			collectionName[:len(q.collectionBaseName)] != q.collectionBaseName {
+			continue
+		}
+
+		// Update chunks for each tag ID
+		for tagID, chunkIDs := range tagGroups {
+			_, err := q.client.SetPayload(ctx, &qdrant.SetPayloadPoints{
+				CollectionName: collectionName,
+				Payload:        qdrant.NewValueMap(map[string]any{fieldTagID: tagID}),
+				PointsSelector: qdrant.NewPointsSelectorFilter(&qdrant.Filter{
+					Must: []*qdrant.Condition{
+						qdrant.NewMatchKeywords(fieldChunkID, chunkIDs...),
+					},
+				}),
+			})
+			if err != nil {
+				log.Warnf("[Qdrant] Failed to update chunks with tag_id %s in %s: %v", tagID, collectionName, err)
+			}
+		}
+	}
+
+	log.Infof("[Qdrant] Batch update chunk tag ID completed")
+	return nil
+}
+
 func (q *qdrantRepository) getBaseFilter(params types.RetrieveParams) *qdrant.Filter {
 	must := make([]*qdrant.Condition, 0)
 	mustNot := make([]*qdrant.Condition, 0)
@@ -433,8 +486,19 @@ func (q *qdrantRepository) getBaseFilter(params types.RetrieveParams) *qdrant.Fi
 	// Only retrieve enabled chunks
 	must = append(must, qdrant.NewMatchBool(fieldIsEnabled, true))
 
+	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
+	// - If only KnowledgeBaseIDs: search entire knowledge bases
+	// - If only KnowledgeIDs: search specific documents
+	// - If both: search specific documents within the knowledge bases (AND)
 	if len(params.KnowledgeBaseIDs) > 0 {
 		must = append(must, qdrant.NewMatchKeywords(fieldKnowledgeBaseID, params.KnowledgeBaseIDs...))
+	}
+	if len(params.KnowledgeIDs) > 0 {
+		must = append(must, qdrant.NewMatchKeywords(fieldKnowledgeID, params.KnowledgeIDs...))
+	}
+	// Filter by tag IDs if specified
+	if len(params.TagIDs) > 0 {
+		must = append(must, qdrant.NewMatchKeywords(fieldTagID, params.TagIDs...))
 	}
 
 	if len(params.ExcludeKnowledgeIDs) > 0 {
@@ -445,10 +509,12 @@ func (q *qdrantRepository) getBaseFilter(params types.RetrieveParams) *qdrant.Fi
 		mustNot = append(mustNot, qdrant.NewMatchKeywords(fieldChunkID, params.ExcludeChunkIDs...))
 	}
 
-	return &qdrant.Filter{
+	filter := &qdrant.Filter{
 		Must:    must,
 		MustNot: mustNot,
 	}
+
+	return filter
 }
 
 // Retrieve dispatches the retrieval operation to the appropriate method based on retriever type
@@ -522,6 +588,7 @@ func (q *qdrantRepository) VectorRetrieve(ctx context.Context,
 				ChunkID:         payload[fieldChunkID].GetStringValue(),
 				KnowledgeID:     payload[fieldKnowledgeID].GetStringValue(),
 				KnowledgeBaseID: payload[fieldKnowledgeBaseID].GetStringValue(),
+				TagID:           payload[fieldTagID].GetStringValue(),
 			},
 			Score: float64(point.Score),
 		}
@@ -614,6 +681,7 @@ func (q *qdrantRepository) KeywordsRetrieve(ctx context.Context,
 					ChunkID:         payload[fieldChunkID].GetStringValue(),
 					KnowledgeID:     payload[fieldKnowledgeID].GetStringValue(),
 					KnowledgeBaseID: payload[fieldKnowledgeBaseID].GetStringValue(),
+					TagID:           payload[fieldTagID].GetStringValue(),
 				},
 				Score: 1.0,
 			}
@@ -644,6 +712,7 @@ func (q *qdrantRepository) CopyIndices(ctx context.Context,
 	sourceToTargetChunkIDMap map[string]string,
 	targetKnowledgeBaseID string,
 	dimension int,
+	knowledgeType string,
 ) error {
 	log := logger.GetLogger(ctx)
 	log.Infof(
@@ -698,6 +767,7 @@ func (q *qdrantRepository) CopyIndices(ctx context.Context,
 
 			sourceChunkID := payload[fieldChunkID].GetStringValue()
 			sourceKnowledgeID := payload[fieldKnowledgeID].GetStringValue()
+			originalSourceID := payload[fieldSourceID].GetStringValue()
 
 			targetChunkID, ok := sourceToTargetChunkIDMap[sourceChunkID]
 			if !ok {
@@ -711,9 +781,25 @@ func (q *qdrantRepository) CopyIndices(ctx context.Context,
 				continue
 			}
 
+			// Handle SourceID transformation for generated questions
+			// Generated questions have SourceID format: {chunkID}-{questionID}
+			// Regular chunks have SourceID == ChunkID
+			var targetSourceID string
+			if originalSourceID == sourceChunkID {
+				// Regular chunk, use targetChunkID as SourceID
+				targetSourceID = targetChunkID
+			} else if strings.HasPrefix(originalSourceID, sourceChunkID+"-") {
+				// This is a generated question, preserve the questionID part
+				questionID := strings.TrimPrefix(originalSourceID, sourceChunkID+"-")
+				targetSourceID = fmt.Sprintf("%s-%s", targetChunkID, questionID)
+			} else {
+				// For other complex scenarios, generate new unique SourceID
+				targetSourceID = uuid.New().String()
+			}
+
 			newPayload := qdrant.NewValueMap(map[string]any{
 				fieldContent:         payload[fieldContent].GetStringValue(),
-				fieldSourceID:        targetChunkID,
+				fieldSourceID:        targetSourceID,
 				fieldSourceType:      payload[fieldSourceType].GetIntegerValue(),
 				fieldChunkID:         targetChunkID,
 				fieldKnowledgeID:     targetKnowledgeID,
@@ -778,6 +864,7 @@ func createPayload(embedding *QdrantVectorEmbedding) map[string]*qdrant.Value {
 		fieldChunkID:         embedding.ChunkID,
 		fieldKnowledgeID:     embedding.KnowledgeID,
 		fieldKnowledgeBaseID: embedding.KnowledgeBaseID,
+		fieldTagID:           embedding.TagID,
 		fieldIsEnabled:       embedding.IsEnabled,
 	}
 	return qdrant.NewValueMap(payload)
@@ -835,6 +922,7 @@ func toQdrantVectorEmbedding(embedding *types.IndexInfo, additionalParams map[st
 		ChunkID:         embedding.ChunkID,
 		KnowledgeID:     embedding.KnowledgeID,
 		KnowledgeBaseID: embedding.KnowledgeBaseID,
+		TagID:           embedding.TagID,
 		IsEnabled:       true, // Default to enabled
 	}
 	if additionalParams != nil && slices.Contains(slices.Collect(maps.Keys(additionalParams)), fieldEmbedding) {
@@ -857,6 +945,7 @@ func fromQdrantVectorEmbedding(id string,
 		ChunkID:         embedding.ChunkID,
 		KnowledgeID:     embedding.KnowledgeID,
 		KnowledgeBaseID: embedding.KnowledgeBaseID,
+		TagID:           embedding.TagID,
 		Content:         embedding.Content,
 		Score:           embedding.Score,
 		MatchType:       matchType,

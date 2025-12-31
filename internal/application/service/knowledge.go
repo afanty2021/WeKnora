@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/docreader/client"
@@ -30,6 +31,7 @@ import (
 	secutils "github.com/Tencent/WeKnora/internal/utils"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/sync/errgroup"
 )
@@ -67,6 +69,7 @@ type knowledgeService struct {
 	modelService    interfaces.ModelService
 	task            *asynq.Client
 	graphEngine     interfaces.RetrieveGraphRepository
+	redisClient     *redis.Client
 }
 
 const (
@@ -91,6 +94,7 @@ func NewKnowledgeService(
 	task *asynq.Client,
 	graphEngine interfaces.RetrieveGraphRepository,
 	retrieveEngine interfaces.RetrieveEngineRegistry,
+	redisClient *redis.Client,
 ) (interfaces.KnowledgeService, error) {
 	return &knowledgeService{
 		config:          config,
@@ -107,6 +111,7 @@ func NewKnowledgeService(
 		task:            task,
 		graphEngine:     graphEngine,
 		retrieveEngine:  retrieveEngine,
+		redisClient:     redisClient,
 	}, nil
 }
 
@@ -343,6 +348,10 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		info.Queue,
 		knowledge.ID,
 	)
+
+	if slices.Contains([]string{"csv", "xlsx", "xls"}, getFileType(safeFilename)) {
+		NewDataTableSummaryTask(ctx, s.task, tenantID, knowledge.ID, kb.SummaryModelID, kb.EmbeddingModelID)
+	}
 
 	logger.Infof(ctx, "Knowledge from file created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
@@ -751,7 +760,7 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 			return err
 		}
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions()); err != nil {
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 			return err
 		}
@@ -835,17 +844,23 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 			logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 			return err
 		}
-		group := map[string][]string{}
-		for _, knowledge := range knowledgeList {
-			group[knowledge.EmbeddingModelID] = append(group[knowledge.EmbeddingModelID], knowledge.ID)
+		// Group by EmbeddingModelID and Type
+		type groupKey struct {
+			EmbeddingModelID string
+			Type             string
 		}
-		for embeddingModelID, knowledgeList := range group {
-			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
+		group := map[groupKey][]string{}
+		for _, knowledge := range knowledgeList {
+			key := groupKey{EmbeddingModelID: knowledge.EmbeddingModelID, Type: knowledge.Type}
+			group[key] = append(group[key], knowledge.ID)
+		}
+		for key, knowledgeIDs := range group {
+			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, key.EmbeddingModelID)
 			if err != nil {
 				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge get embedding model failed")
 				return err
 			}
-			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeList, embeddingModel.GetDimensions()); err != nil {
+			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDs, embeddingModel.GetDimensions(), key.Type); err != nil {
 				logger.GetLogger(ctx).
 					WithField("error", err).
 					Errorf("DeleteKnowledge delete knowledge embedding failed")
@@ -1052,7 +1067,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
 	if err == nil {
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions()); err != nil {
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 			logger.Warnf(ctx, "Failed to delete existing index data (may not exist): %v", err)
 			// 不返回错误，继续处理（可能没有旧数据）
 		} else {
@@ -1344,7 +1359,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 
 		// delete index
 		if err := retrieveEngine.DeleteByKnowledgeIDList(
-			ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(),
+			ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type,
 		); err != nil {
 			logger.Errorf(ctx, "Delete index failed: %v", err)
 		}
@@ -1371,7 +1386,7 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		if err := s.chunkService.DeleteChunksByKnowledgeID(ctx, knowledge.ID); err != nil {
 			logger.Warnf(ctx, "Failed to cleanup chunks after deletion detected: %v", err)
 		}
-		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions()); err != nil {
+		if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), kb.Type); err != nil {
 			logger.Warnf(ctx, "Failed to cleanup index after deletion detected: %v", err)
 		}
 		span.AddEvent("aborted: knowledge was deleted during processing")
@@ -1946,10 +1961,10 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 	}
 
 	// Replace placeholders
-	prompt = strings.ReplaceAll(prompt, "{{.QuestionCount}}", fmt.Sprintf("%d", questionCount))
-	prompt = strings.ReplaceAll(prompt, "{{.Content}}", content)
-	prompt = strings.ReplaceAll(prompt, "{{.Context}}", contextSection)
-	prompt = strings.ReplaceAll(prompt, "{{.DocName}}", docName)
+	prompt = strings.ReplaceAll(prompt, "{{question_count}}", fmt.Sprintf("%d", questionCount))
+	prompt = strings.ReplaceAll(prompt, "{{content}}", content)
+	prompt = strings.ReplaceAll(prompt, "{{context}}", contextSection)
+	prompt = strings.ReplaceAll(prompt, "{{doc_name}}", docName)
 
 	thinking := false
 	response, err := chatModel.Chat(ctx, []chat.Message{
@@ -1990,11 +2005,11 @@ func (s *knowledgeService) generateQuestionsWithContext(ctx context.Context,
 // Default prompt for question generation with context support
 const defaultQuestionGenerationPrompt = `你是一个专业的问题生成助手。你的任务是根据给定的【主要内容】生成用户可能会问的相关问题。
 
-{{.Context}}
+{{context}}
 ## 主要内容（请基于此内容生成问题）
-文档名称：{{.DocName}}
+文档名称：{{doc_name}}
 文档内容：
-{{.Content}}
+{{content}}
 
 ## 核心要求
 - 生成的问题必须与【主要内容】直接相关
@@ -2003,7 +2018,7 @@ const defaultQuestionGenerationPrompt = `你是一个专业的问题生成助手
 - 问题应该是用户在实际场景中可能会提出的自然问题
 - 问题应该多样化，覆盖内容的不同方面
 - 每个问题应该简洁明了，长度控制在30字以内
-- 生成的问题数量为 {{.QuestionCount}} 个
+- 生成的问题数量为 {{question_count}} 个
 
 ## 问题类型建议
 - 定义类：什么是...？...是什么？
@@ -2326,7 +2341,7 @@ func (s *knowledgeService) updateChunkVector(ctx context.Context, kbID string, c
 	}
 
 	// Delete old vector representation of the chunk
-	err = retrieveEngine.DeleteByChunkIDList(ctx, ids, embeddingModel.GetDimensions())
+	err = retrieveEngine.DeleteByChunkIDList(ctx, ids, embeddingModel.GetDimensions(), sourceKB.Type)
 	if err != nil {
 		return err
 	}
@@ -2521,6 +2536,7 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 	chunkPage := 1
 	chunkPageSize := 100
 	srcTodst := map[string]string{}
+	tagIDMapping := map[string]string{} // srcTagID -> dstTagID
 	targetChunks := make([]*types.Chunk, 0, 10)
 	chunkType := []types.ChunkType{
 		types.ChunkTypeText, types.ChunkTypeSummary,
@@ -2537,6 +2553,9 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 			chunkType,
 			"",
 			"",
+			"",
+			"",
+			"",
 		)
 		chunkPage++
 		if err != nil {
@@ -2545,22 +2564,41 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 		if len(sourceChunks) == 0 {
 			break
 		}
+		now := time.Now()
 		for _, sourceChunk := range sourceChunks {
+			// Map TagID to target knowledge base
+			targetTagID := ""
+			if sourceChunk.TagID != "" {
+				if mappedTagID, ok := tagIDMapping[sourceChunk.TagID]; ok {
+					targetTagID = mappedTagID
+				} else {
+					// Try to find or create the tag in target knowledge base
+					targetTagID = s.getOrCreateTagInTarget(ctx, src.TenantID, dst.TenantID, dst.KnowledgeBaseID, sourceChunk.TagID, tagIDMapping)
+				}
+			}
+
 			targetChunk := &types.Chunk{
 				ID:              uuid.New().String(),
 				TenantID:        dst.TenantID,
 				KnowledgeID:     dst.ID,
 				KnowledgeBaseID: dst.KnowledgeBaseID,
+				TagID:           targetTagID,
 				Content:         sourceChunk.Content,
 				ChunkIndex:      sourceChunk.ChunkIndex,
 				IsEnabled:       sourceChunk.IsEnabled,
+				Flags:           sourceChunk.Flags,
+				Status:          sourceChunk.Status,
 				StartAt:         sourceChunk.StartAt,
 				EndAt:           sourceChunk.EndAt,
 				PreChunkID:      sourceChunk.PreChunkID,
 				NextChunkID:     sourceChunk.NextChunkID,
 				ChunkType:       sourceChunk.ChunkType,
 				ParentChunkID:   sourceChunk.ParentChunkID,
+				Metadata:        sourceChunk.Metadata,
+				ContentHash:     sourceChunk.ContentHash,
 				ImageInfo:       sourceChunk.ImageInfo,
+				CreatedAt:       now,
+				UpdatedAt:       now,
 			}
 			targetChunks = append(targetChunks, targetChunk)
 			srcTodst[sourceChunk.ID] = targetChunk.ID
@@ -2603,6 +2641,7 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 		map[string]string{src.ID: dst.ID},
 		srcTodst,
 		embeddingModel.GetDimensions(),
+		dst.Type,
 	); err != nil {
 		return err
 	}
@@ -2611,7 +2650,7 @@ func (s *knowledgeService) CloneChunk(ctx context.Context, src, dst *types.Knowl
 
 // ListFAQEntries lists FAQ entries under a FAQ knowledge base.
 func (s *knowledgeService) ListFAQEntries(ctx context.Context,
-	kbID string, page *types.Pagination, tagID string, keyword string,
+	kbID string, page *types.Pagination, tagID string, keyword string, searchField string, sortOrder string,
 ) (*types.PageResult, error) {
 	if page == nil {
 		page = &types.Pagination{}
@@ -2631,11 +2670,33 @@ func (s *knowledgeService) ListFAQEntries(ctx context.Context,
 	}
 	chunkType := []types.ChunkType{types.ChunkTypeFAQ}
 	chunks, total, err := s.chunkRepo.ListPagedChunksByKnowledgeID(
-		ctx, tenantID, faqKnowledge.ID, page, chunkType, tagID, keyword,
+		ctx, tenantID, faqKnowledge.ID, page, chunkType, tagID, keyword, searchField, sortOrder, types.KnowledgeTypeFAQ,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	// Build tag ID to name mapping for all unique tag IDs (batch query)
+	tagNameMap := make(map[string]string)
+	tagIDs := make([]string, 0)
+	tagIDSet := make(map[string]struct{})
+	for _, chunk := range chunks {
+		if chunk.TagID != "" {
+			if _, exists := tagIDSet[chunk.TagID]; !exists {
+				tagIDSet[chunk.TagID] = struct{}{}
+				tagIDs = append(tagIDs, chunk.TagID)
+			}
+		}
+	}
+	if len(tagIDs) > 0 {
+		tags, err := s.tagRepo.GetByIDs(ctx, tenantID, tagIDs)
+		if err == nil {
+			for _, tag := range tags {
+				tagNameMap[tag.ID] = tag.Name
+			}
+		}
+	}
+
 	kb.EnsureDefaults()
 	entries := make([]*types.FAQEntry, 0, len(chunks))
 	for _, chunk := range chunks {
@@ -2643,13 +2704,17 @@ func (s *knowledgeService) ListFAQEntries(ctx context.Context,
 		if err != nil {
 			return nil, err
 		}
+		// Set tag name from mapping
+		if entry.TagID != "" {
+			entry.TagName = tagNameMap[entry.TagID]
+		}
 		entries = append(entries, entry)
 	}
 	return types.NewPageResult(total, page, entries), nil
 }
 
 // UpsertFAQEntries imports or appends FAQ entries asynchronously.
-// Returns task ID for tracking import progress.
+// Returns task ID (UUID) for tracking import progress.
 func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 	kbID string, payload *types.FAQBatchUpsertPayload,
 ) (string, error) {
@@ -2671,14 +2736,14 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
-	// 检查是否有正在进行的导入任务
-	runningKnowledge, err := s.getRunningFAQImportTask(ctx, kbID, tenantID)
+	// 检查是否有正在进行的导入任务（通过Redis）
+	runningTaskID, err := s.getRunningFAQImportTaskID(ctx, kbID)
 	if err != nil {
 		logger.Errorf(ctx, "Failed to check running import task: %v", err)
 		// 检查失败不影响导入，继续执行
-	} else if runningKnowledge != nil {
-		logger.Warnf(ctx, "Import task already running for KB %s: %s (status: %s)", kbID, runningKnowledge.ID, runningKnowledge.ParseStatus)
-		return "", werrors.NewBadRequestError(fmt.Sprintf("该知识库已有导入任务正在进行中（任务ID: %s），请等待完成后再试", runningKnowledge.ID))
+	} else if runningTaskID != "" {
+		logger.Warnf(ctx, "Import task already running for KB %s: %s", kbID, runningTaskID)
+		return "", werrors.NewBadRequestError(fmt.Sprintf("该知识库已有导入任务正在进行中（任务ID: %s），请等待完成后再试", runningTaskID))
 	}
 
 	faqKnowledge, err := s.ensureFAQKnowledge(ctx, tenantID, kb)
@@ -2686,16 +2751,34 @@ func (s *knowledgeService) UpsertFAQEntries(ctx context.Context,
 		return "", fmt.Errorf("failed to ensure FAQ knowledge: %w", err)
 	}
 
-	// 初始化导入任务状态到Knowledge表
-	taskID := faqKnowledge.ID // 使用Knowledge ID作为taskID
-	if err := s.updateFAQImportStatusWithRanges(ctx, taskID, types.FAQImportStatusPending,
-		0, len(payload.Entries), 0, ""); err != nil {
+	// 生成UUID作为任务ID
+	taskID := uuid.New().String()
+
+	// 初始化导入任务状态到Redis
+	progress := &types.FAQImportProgress{
+		TaskID:      taskID,
+		KBID:        kbID,
+		KnowledgeID: faqKnowledge.ID,
+		Status:      types.FAQImportStatusPending,
+		Progress:    0,
+		Total:       len(payload.Entries),
+		Processed:   0,
+		Message:     "任务已创建，等待处理",
+		CreatedAt:   time.Now().Unix(),
+		UpdatedAt:   time.Now().Unix(),
+	}
+	if err := s.saveFAQImportProgress(ctx, progress); err != nil {
 		logger.Errorf(ctx, "Failed to initialize FAQ import task status: %v", err)
 		return "", fmt.Errorf("failed to initialize task: %w", err)
 	}
 
-	logger.Infof(ctx, "Allocated ChunkIndex range [%d, %d] for FAQ import task %s, next ChunkIndex will be %d",
-		taskID)
+	// 设置 KB 的运行中任务 ID
+	if err := s.setRunningFAQImportTaskID(ctx, kbID, taskID); err != nil {
+		logger.Errorf(ctx, "Failed to set running FAQ import task ID: %v", err)
+		// 不影响任务执行，继续
+	}
+
+	logger.Infof(ctx, "FAQ import task initialized: %s, kb_id: %s, total entries: %d", taskID, kbID, len(payload.Entries))
 
 	// Enqueue FAQ import task to Asynq
 	logger.Info(ctx, "Enqueuing FAQ import task to Asynq")
@@ -3128,7 +3211,7 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 		actualProcessed += len(batch)
 		// 更新任务进度
 		progress := int(float64(actualProcessed) / float64(totalEntries) * 100)
-		if err := s.updateFAQImportStatus(ctx, taskID, types.FAQImportStatusProcessing, progress, totalEntries, actualProcessed, ""); err != nil {
+		if err := s.updateFAQImportProgressStatus(ctx, taskID, types.FAQImportStatusProcessing, progress, totalEntries, actualProcessed, fmt.Sprintf("正在处理第 %d/%d 条", actualProcessed, totalEntries), ""); err != nil {
 			logger.Errorf(ctx, "Failed to update task progress: %v", err)
 		}
 
@@ -3264,6 +3347,63 @@ func (s *knowledgeService) CreateFAQEntry(ctx context.Context,
 	entry, err := s.chunkToFAQEntry(chunk, kb)
 	if err != nil {
 		return nil, err
+	}
+
+	// 查询TagName
+	if entry.TagID != "" {
+		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, entry.TagID)
+		if tagErr == nil && tag != nil {
+			entry.TagName = tag.Name
+		}
+	}
+
+	return entry, nil
+}
+
+// GetFAQEntry retrieves a single FAQ entry by ID.
+func (s *knowledgeService) GetFAQEntry(ctx context.Context,
+	kbID string, entryID string,
+) (*types.FAQEntry, error) {
+	if entryID == "" {
+		return nil, werrors.NewBadRequestError("条目ID不能为空")
+	}
+
+	kb, err := s.validateFAQKnowledgeBase(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	kb.EnsureDefaults()
+
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+
+	// 获取chunk
+	chunk, err := s.chunkService.GetChunkByID(ctx, entryID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 验证chunk属于当前知识库
+	if chunk.KnowledgeBaseID != kb.ID || chunk.TenantID != tenantID {
+		return nil, werrors.NewNotFoundError("FAQ条目不存在")
+	}
+
+	// 验证是FAQ类型
+	if chunk.ChunkType != types.ChunkTypeFAQ {
+		return nil, werrors.NewNotFoundError("FAQ条目不存在")
+	}
+
+	// 转换为FAQEntry返回
+	entry, err := s.chunkToFAQEntry(chunk, kb)
+	if err != nil {
+		return nil, err
+	}
+
+	// 查询TagName
+	if entry.TagID != "" {
+		tag, tagErr := s.tagRepo.GetByID(ctx, tenantID, entry.TagID)
+		if tagErr == nil && tag != nil {
+			entry.TagName = tag.Name
+		}
 	}
 
 	return entry, nil
@@ -3418,6 +3558,7 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	enabledUpdates := make(map[string]bool)
+	tagUpdates := make(map[string]string)
 
 	// Handle ByTag updates first
 	if len(req.ByTag) > 0 {
@@ -3436,16 +3577,23 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 			// Update all chunks with this tag
 			affectedIDs, err := s.chunkRepo.UpdateChunkFieldsByTagID(
 				ctx, tenantID, kb.ID, tagID,
-				update.IsEnabled, setFlags, clearFlags,
+				update.IsEnabled, setFlags, clearFlags, update.TagID, req.ExcludeIDs,
 			)
 			if err != nil {
 				return err
 			}
 
 			// Collect affected IDs for retriever sync
-			if update.IsEnabled != nil && len(affectedIDs) > 0 {
-				for _, id := range affectedIDs {
-					enabledUpdates[id] = *update.IsEnabled
+			if len(affectedIDs) > 0 {
+				if update.IsEnabled != nil {
+					for _, id := range affectedIDs {
+						enabledUpdates[id] = *update.IsEnabled
+					}
+				}
+				if update.TagID != nil {
+					for _, id := range affectedIDs {
+						tagUpdates[id] = *update.TagID
+					}
 				}
 			}
 		}
@@ -3504,6 +3652,7 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 				}
 				if chunk.TagID != newTagID {
 					chunk.TagID = newTagID
+					tagUpdates[chunk.ID] = newTagID
 					needUpdate = true
 				}
 			}
@@ -3529,8 +3678,8 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 		}
 	}
 
-	// Sync enabled status to retriever engines
-	if len(enabledUpdates) > 0 {
+	// Sync to retriever engines
+	if len(enabledUpdates) > 0 || len(tagUpdates) > 0 {
 		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(
 			s.retrieveEngine,
@@ -3539,8 +3688,15 @@ func (s *knowledgeService) UpdateFAQEntryFieldsBatch(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		if err := retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, enabledUpdates); err != nil {
-			return err
+		if len(enabledUpdates) > 0 {
+			if err := retrieveEngine.BatchUpdateChunkEnabledStatus(ctx, enabledUpdates); err != nil {
+				return err
+			}
+		}
+		if len(tagUpdates) > 0 {
+			if err := retrieveEngine.BatchUpdateChunkTagID(ctx, tagUpdates); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -3670,9 +3826,27 @@ func (s *knowledgeService) UpdateFAQEntryTag(ctx context.Context, kbID string, e
 		resolvedTagID = tag.ID
 	}
 
+	// Check if tag actually changed
+	if chunk.TagID == resolvedTagID {
+		return nil
+	}
+
 	chunk.TagID = resolvedTagID
 	chunk.UpdatedAt = time.Now()
-	return s.chunkRepo.UpdateChunk(ctx, chunk)
+	if err := s.chunkRepo.UpdateChunk(ctx, chunk); err != nil {
+		return err
+	}
+
+	// Sync tag update to retriever engines
+	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(
+		s.retrieveEngine,
+		tenantInfo.GetEffectiveEngines(),
+	)
+	if err != nil {
+		return err
+	}
+	return retrieveEngine.BatchUpdateChunkTagID(ctx, map[string]string{chunk.ID: resolvedTagID})
 }
 
 // UpdateFAQEntryTagBatch updates tags for FAQ entries in batch.
@@ -3749,7 +3923,26 @@ func (s *knowledgeService) UpdateFAQEntryTagBatch(ctx context.Context, kbID stri
 	}
 
 	if len(chunksToUpdate) > 0 {
-		return s.chunkRepo.UpdateChunks(ctx, chunksToUpdate)
+		if err := s.chunkRepo.UpdateChunks(ctx, chunksToUpdate); err != nil {
+			return err
+		}
+
+		// Sync tag updates to retriever engines
+		tagUpdates := make(map[string]string)
+		for _, chunk := range chunksToUpdate {
+			tagUpdates[chunk.ID] = chunk.TagID
+		}
+		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(
+			s.retrieveEngine,
+			tenantInfo.GetEffectiveEngines(),
+		)
+		if err != nil {
+			return err
+		}
+		if err := retrieveEngine.BatchUpdateChunkTagID(ctx, tagUpdates); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -3776,18 +3969,101 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 		req.MatchCount = 50
 	}
 
-	// Prepare search parameters
-	searchParams := types.SearchParams{
-		QueryText:            secutils.SanitizeForLog(req.QueryText),
-		VectorThreshold:      req.VectorThreshold,
-		MatchCount:           req.MatchCount,
-		DisableKeywordsMatch: true,
+	// Build priority tag sets for sorting
+	hasFirstPriority := len(req.FirstPriorityTagIDs) > 0
+	hasSecondPriority := len(req.SecondPriorityTagIDs) > 0
+	hasPriorityFilter := hasFirstPriority || hasSecondPriority
+
+	firstPrioritySet := make(map[string]struct{}, len(req.FirstPriorityTagIDs))
+	for _, tagID := range req.FirstPriorityTagIDs {
+		firstPrioritySet[tagID] = struct{}{}
+	}
+	secondPrioritySet := make(map[string]struct{}, len(req.SecondPriorityTagIDs))
+	for _, tagID := range req.SecondPriorityTagIDs {
+		secondPrioritySet[tagID] = struct{}{}
 	}
 
-	// Call HybridSearch
-	searchResults, err := s.kbService.HybridSearch(ctx, kbID, searchParams)
-	if err != nil {
-		return nil, err
+	// Perform separate searches for each priority level to ensure FirstPriority results
+	// are not crowded out by higher-scoring SecondPriority results in TopK truncation
+	var searchResults []*types.SearchResult
+
+	if hasPriorityFilter {
+		// Use goroutines to search both priority levels concurrently
+		var (
+			firstResults  []*types.SearchResult
+			secondResults []*types.SearchResult
+			firstErr      error
+			secondErr     error
+			wg            sync.WaitGroup
+		)
+
+		if hasFirstPriority {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				firstParams := types.SearchParams{
+					QueryText:            secutils.SanitizeForLog(req.QueryText),
+					VectorThreshold:      req.VectorThreshold,
+					MatchCount:           req.MatchCount,
+					DisableKeywordsMatch: true,
+					TagIDs:               req.FirstPriorityTagIDs,
+				}
+				firstResults, firstErr = s.kbService.HybridSearch(ctx, kbID, firstParams)
+			}()
+		}
+
+		if hasSecondPriority {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				secondParams := types.SearchParams{
+					QueryText:            secutils.SanitizeForLog(req.QueryText),
+					VectorThreshold:      req.VectorThreshold,
+					MatchCount:           req.MatchCount,
+					DisableKeywordsMatch: true,
+					TagIDs:               req.SecondPriorityTagIDs,
+				}
+				secondResults, secondErr = s.kbService.HybridSearch(ctx, kbID, secondParams)
+			}()
+		}
+
+		wg.Wait()
+
+		// Check errors
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		if secondErr != nil {
+			return nil, secondErr
+		}
+
+		// Merge results: FirstPriority first, then SecondPriority (deduplicated)
+		seenChunkIDs := make(map[string]struct{})
+		for _, result := range firstResults {
+			if _, exists := seenChunkIDs[result.ID]; !exists {
+				seenChunkIDs[result.ID] = struct{}{}
+				searchResults = append(searchResults, result)
+			}
+		}
+		for _, result := range secondResults {
+			if _, exists := seenChunkIDs[result.ID]; !exists {
+				seenChunkIDs[result.ID] = struct{}{}
+				searchResults = append(searchResults, result)
+			}
+		}
+	} else {
+		// No priority filter, search all
+		searchParams := types.SearchParams{
+			QueryText:            secutils.SanitizeForLog(req.QueryText),
+			VectorThreshold:      req.VectorThreshold,
+			MatchCount:           req.MatchCount,
+			DisableKeywordsMatch: true,
+		}
+		var err error
+		searchResults, err = s.kbService.HybridSearch(ctx, kbID, searchParams)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(searchResults) == 0 {
@@ -3843,9 +4119,52 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 		entries = append(entries, entry)
 	}
 
-	slices.SortFunc(entries, func(a, b *types.FAQEntry) int {
-		return int(b.Score - a.Score)
-	})
+	// Sort entries with two-level priority tag support
+	if hasPriorityFilter {
+		// getPriorityLevel returns: 0 = first priority, 1 = second priority, 2 = no priority
+		getPriorityLevel := func(tagID string) int {
+			if _, ok := firstPrioritySet[tagID]; ok {
+				return 0
+			}
+			if _, ok := secondPrioritySet[tagID]; ok {
+				return 1
+			}
+			return 2
+		}
+
+		slices.SortFunc(entries, func(a, b *types.FAQEntry) int {
+			aPriority := getPriorityLevel(a.TagID)
+			bPriority := getPriorityLevel(b.TagID)
+
+			// Compare by priority level first
+			if aPriority != bPriority {
+				return aPriority - bPriority // Lower level = higher priority
+			}
+
+			// Same priority level, sort by score descending
+			if b.Score > a.Score {
+				return 1
+			} else if b.Score < a.Score {
+				return -1
+			}
+			return 0
+		})
+	} else {
+		// No priority tags, sort by score only
+		slices.SortFunc(entries, func(a, b *types.FAQEntry) int {
+			if b.Score > a.Score {
+				return 1
+			} else if b.Score < a.Score {
+				return -1
+			}
+			return 0
+		})
+	}
+
+	// Limit results to requested match count
+	if len(entries) > req.MatchCount {
+		entries = entries[:req.MatchCount]
+	}
 
 	return entries, nil
 }
@@ -3893,6 +4212,128 @@ func (s *knowledgeService) DeleteFAQEntries(ctx context.Context,
 		}
 	}
 	return nil
+}
+
+// ExportFAQEntries exports all FAQ entries for a knowledge base as CSV data.
+// The CSV format matches the import example format with 8 columns:
+// 分类(必填), 问题(必填), 相似问题(选填-多个用##分隔), 反例问题(选填-多个用##分隔),
+// 机器人回答(必填-多个用##分隔), 是否全部回复(选填-默认FALSE), 是否停用(选填-默认FALSE),
+// 是否禁止被推荐(选填-默认False 可被推荐)
+func (s *knowledgeService) ExportFAQEntries(ctx context.Context, kbID string) ([]byte, error) {
+	kb, err := s.validateFAQKnowledgeBase(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	faqKnowledge, err := s.findFAQKnowledge(ctx, tenantID, kb.ID)
+	if err != nil {
+		return nil, err
+	}
+	if faqKnowledge == nil {
+		// Return empty CSV with headers only
+		return s.buildFAQCSV(nil, nil), nil
+	}
+
+	// Get all FAQ chunks
+	chunks, err := s.chunkRepo.ListAllFAQChunksForExport(ctx, tenantID, faqKnowledge.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list FAQ chunks: %w", err)
+	}
+
+	// Build tag map for tag_id -> tag_name conversion
+	tagMap, err := s.buildTagMap(ctx, tenantID, kbID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build tag map: %w", err)
+	}
+
+	return s.buildFAQCSV(chunks, tagMap), nil
+}
+
+// buildTagMap builds a map from tag_id to tag_name for the given knowledge base.
+func (s *knowledgeService) buildTagMap(ctx context.Context, tenantID uint64, kbID string) (map[string]string, error) {
+	// Get all tags for this knowledge base (no pagination limit)
+	page := &types.Pagination{Page: 1, PageSize: 10000}
+	tags, _, err := s.tagRepo.ListByKB(ctx, tenantID, kbID, page, "")
+	if err != nil {
+		return nil, err
+	}
+
+	tagMap := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		if tag != nil {
+			tagMap[tag.ID] = tag.Name
+		}
+	}
+	return tagMap, nil
+}
+
+// buildFAQCSV builds CSV content from FAQ chunks.
+func (s *knowledgeService) buildFAQCSV(chunks []*types.Chunk, tagMap map[string]string) []byte {
+	var buf strings.Builder
+
+	// Write CSV header (matching import example format)
+	headers := []string{
+		"分类(必填)",
+		"问题(必填)",
+		"相似问题(选填-多个用##分隔)",
+		"反例问题(选填-多个用##分隔)",
+		"机器人回答(必填-多个用##分隔)",
+		"是否全部回复(选填-默认FALSE)",
+		"是否停用(选填-默认FALSE)",
+		"是否禁止被推荐(选填-默认False 可被推荐)",
+	}
+	buf.WriteString(strings.Join(headers, ","))
+	buf.WriteString("\n")
+
+	// Write data rows
+	for _, chunk := range chunks {
+		meta, err := chunk.FAQMetadata()
+		if err != nil || meta == nil {
+			continue
+		}
+
+		// Get tag name
+		tagName := ""
+		if chunk.TagID != "" && tagMap != nil {
+			if name, ok := tagMap[chunk.TagID]; ok {
+				tagName = name
+			}
+		}
+
+		// Build row
+		row := []string{
+			escapeCSVField(tagName),
+			escapeCSVField(meta.StandardQuestion),
+			escapeCSVField(strings.Join(meta.SimilarQuestions, "##")),
+			escapeCSVField(strings.Join(meta.NegativeQuestions, "##")),
+			escapeCSVField(strings.Join(meta.Answers, "##")),
+			boolToCSV(meta.AnswerStrategy == types.AnswerStrategyAll),
+			boolToCSV(!chunk.IsEnabled),                                 // 是否停用：取反
+			boolToCSV(!chunk.Flags.HasFlag(types.ChunkFlagRecommended)), // 是否禁止被推荐：取反
+		}
+		buf.WriteString(strings.Join(row, ","))
+		buf.WriteString("\n")
+	}
+
+	return []byte(buf.String())
+}
+
+// escapeCSVField escapes a field for CSV format.
+func escapeCSVField(field string) string {
+	// If field contains comma, newline, or quote, wrap in quotes and escape internal quotes
+	if strings.ContainsAny(field, ",\"\n\r") {
+		return "\"" + strings.ReplaceAll(field, "\"", "\"\"") + "\""
+	}
+	return field
+}
+
+// boolToCSV converts a boolean to CSV TRUE/FALSE string.
+func boolToCSV(b bool) string {
+	if b {
+		return "TRUE"
+	}
+	return "FALSE"
 }
 
 func (s *knowledgeService) validateFAQKnowledgeBase(ctx context.Context, kbID string) (*types.KnowledgeBase, error) {
@@ -3958,77 +4399,73 @@ func (s *knowledgeService) ensureFAQKnowledge(
 	return knowledge, nil
 }
 
-func (s *knowledgeService) updateFAQImportStatus(
+// updateFAQImportProgressStatus updates the FAQ import progress in Redis
+func (s *knowledgeService) updateFAQImportProgressStatus(
 	ctx context.Context,
-	knowledgeID string,
+	taskID string,
 	status types.FAQImportTaskStatus,
 	progress, total, processed int,
-	errorMsg string,
+	message, errorMsg string,
 ) error {
-	return s.updateFAQImportStatusWithRanges(ctx, knowledgeID, status, progress, total, processed, errorMsg)
-}
-
-// updateFAQImportStatusWithRanges 更新FAQ Knowledge的导入任务状态，包含NextChunkIndex
-func (s *knowledgeService) updateFAQImportStatusWithRanges(
-	ctx context.Context,
-	knowledgeID string,
-	status types.FAQImportTaskStatus,
-	progress, total, processed int,
-	errorMsg string,
-) error {
-	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, tenantID, knowledgeID)
+	// Get existing progress from Redis
+	existingProgress, err := s.GetFAQImportProgress(ctx, taskID)
 	if err != nil {
-		return err
+		// If not found, create a new progress entry
+		existingProgress = &types.FAQImportProgress{
+			TaskID:    taskID,
+			CreatedAt: time.Now().Unix(),
+		}
 	}
 
-	// 更新ParseStatus：将FAQImportTaskStatus映射到ParseStatus
-
-	knowledge.ParseStatus = string(status)
-	knowledge.UpdatedAt = time.Now()
-
-	meta, err := types.ParseFAQImportMetadata(knowledge)
-	if err != nil || meta == nil {
-		meta = &types.FAQImportMetadata{}
+	// Update progress fields
+	existingProgress.Status = status
+	existingProgress.Progress = progress
+	existingProgress.Total = total
+	existingProgress.Processed = processed
+	if message != "" {
+		existingProgress.Message = message
 	}
-
-	// 更新ErrorMessage
-	knowledge.ErrorMessage = errorMsg
+	existingProgress.Error = errorMsg
 	if status == types.FAQImportStatusCompleted {
-		knowledge.ErrorMessage = ""
+		existingProgress.Error = ""
 	}
 
-	// 更新Metadata中的导入进度信息，保留已有的ChunkIndexRanges和NextChunkIndex
-	meta.ImportProgress = progress
-	meta.ImportTotal = total
-	meta.ImportProcessed = processed
-	metaJSON, err := meta.ToJSON()
-	if err != nil {
-		return fmt.Errorf("failed to marshal import metadata: %w", err)
+	// 任务完成或失败时，清除 running key
+	if status == types.FAQImportStatusCompleted || status == types.FAQImportStatusFailed {
+		if existingProgress.KBID != "" {
+			if clearErr := s.clearRunningFAQImportTaskID(ctx, existingProgress.KBID); clearErr != nil {
+				logger.Errorf(ctx, "Failed to clear running FAQ import task ID: %v", clearErr)
+			}
+		}
 	}
-	knowledge.Metadata = metaJSON
 
-	return s.repo.UpdateKnowledge(ctx, knowledge)
+	return s.saveFAQImportProgress(ctx, existingProgress)
 }
 
-// getRunningFAQImportTask 获取指定知识库的进行中导入任务
-func (s *knowledgeService) getRunningFAQImportTask(
-	ctx context.Context,
-	kbID string,
-	tenantID uint64,
-) (*types.Knowledge, error) {
-	faqKnowledge, err := s.findFAQKnowledge(ctx, tenantID, kbID)
+// getRunningFAQImportTaskID checks if there's a running FAQ import task for the given KB
+// Returns the task ID if found, empty string otherwise
+func (s *knowledgeService) getRunningFAQImportTaskID(ctx context.Context, kbID string) (string, error) {
+	key := getFAQImportRunningKey(kbID)
+	taskID, err := s.redisClient.Get(ctx, key).Result()
 	if err != nil {
-		return nil, err
+		if errors.Is(err, redis.Nil) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get running FAQ import task: %w", err)
 	}
-	if faqKnowledge == nil {
-		return nil, errors.New("FAQ knowledge not found")
-	}
-	// 检查ParseStatus是否为pending或processing（进行中状态）
-	if faqKnowledge.ParseStatus == "pending" || faqKnowledge.ParseStatus == "processing" {
-		return faqKnowledge, nil
-	}
-	return nil, nil
+	return taskID, nil
+}
+
+// setRunningFAQImportTaskID sets the running task ID for a KB
+func (s *knowledgeService) setRunningFAQImportTaskID(ctx context.Context, kbID, taskID string) error {
+	key := getFAQImportRunningKey(kbID)
+	return s.redisClient.Set(ctx, key, taskID, faqImportProgressTTL).Err()
+}
+
+// clearRunningFAQImportTaskID clears the running task ID for a KB
+func (s *knowledgeService) clearRunningFAQImportTaskID(ctx context.Context, kbID string) error {
+	key := getFAQImportRunningKey(kbID)
+	return s.redisClient.Del(ctx, key).Err()
 }
 
 func (s *knowledgeService) chunkToFAQEntry(chunk *types.Chunk, kb *types.KnowledgeBase) (*types.FAQEntry, error) {
@@ -4246,6 +4683,9 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 				ChunkID:         chunk.ID,
 				KnowledgeID:     chunk.KnowledgeID,
 				KnowledgeBaseID: chunk.KnowledgeBaseID,
+				KnowledgeType:   types.KnowledgeTypeFAQ,
+				TagID:           chunk.TagID,
+				IsEnabled:       chunk.IsEnabled,
 			},
 		}, nil
 	}
@@ -4271,6 +4711,9 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 		ChunkID:         chunk.ID,
 		KnowledgeID:     chunk.KnowledgeID,
 		KnowledgeBaseID: chunk.KnowledgeBaseID,
+		KnowledgeType:   types.KnowledgeTypeFAQ,
+		TagID:           chunk.TagID,
+		IsEnabled:       chunk.IsEnabled,
 	})
 
 	// 每个相似问创建一个索引项
@@ -4293,6 +4736,9 @@ func (s *knowledgeService) buildFAQIndexInfoList(
 			ChunkID:         chunk.ID,
 			KnowledgeID:     chunk.KnowledgeID,
 			KnowledgeBaseID: chunk.KnowledgeBaseID,
+			KnowledgeType:   types.KnowledgeTypeFAQ,
+			TagID:           chunk.TagID,
+			IsEnabled:       chunk.IsEnabled,
 		})
 	}
 
@@ -4352,7 +4798,7 @@ func (s *knowledgeService) indexFAQChunks(ctx context.Context,
 	var deleteDuration time.Duration
 	if needDelete {
 		deleteStartTime := time.Now()
-		if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions()); err != nil {
+		if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 			logger.Warnf(ctx, "Delete FAQ vectors failed: %v", err)
 		}
 		deleteDuration = time.Since(deleteStartTime)
@@ -4435,7 +4881,7 @@ func (s *knowledgeService) deleteFAQChunkVectors(ctx context.Context,
 	}
 
 	size := retrieveEngine.EstimateStorageSize(ctx, embeddingModel, indexInfo)
-	if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions()); err != nil {
+	if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 		return err
 	}
 	if size > 0 {
@@ -4497,11 +4943,6 @@ func (s *knowledgeService) triggerManualProcessing(ctx context.Context,
 		if cfg == nil {
 			logger.GetLogger(ctx).WithField("knowledge_id", knowledge.ID).
 				Error("triggerManualProcessing enable multimodal but VLM config missing")
-			knowledge.ParseStatus = "failed"
-			knowledge.ErrorMessage = "VLM 配置缺失"
-			knowledge.UpdatedAt = time.Now()
-			s.repo.UpdateKnowledge(ctx, knowledge)
-			return
 		}
 		vlmConfig = cfg
 	}
@@ -4575,7 +5016,7 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 				logger.GetLogger(ctx).WithField("error", modelErr).Error("Failed to get embedding model during cleanup")
 				cleanupErr = errors.Join(cleanupErr, modelErr)
 			} else {
-				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions()); err != nil {
+				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
 					logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge index")
 					cleanupErr = errors.Join(cleanupErr, err)
 				}
@@ -4931,7 +5372,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 		payload.TaskID, payload.KBID, len(payload.Entries), retryCount, maxRetry)
 
 	// 幂等性检查：获取knowledge记录（FAQ任务使用knowledge ID作为taskID）
-	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.TaskID)
+	knowledge, err := s.repo.GetKnowledgeByID(ctx, payload.TenantID, payload.KnowledgeID)
 	if err != nil {
 		logger.Errorf(ctx, "failed to get FAQ knowledge: %v", err)
 		return nil
@@ -4946,24 +5387,22 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 		logger.Errorf(ctx, "Failed to get knowledge base: %v", err)
 		// 如果是最后一次重试，更新状态为失败
 		if isLastRetry {
-			if updateErr := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, len(payload.Entries), 0, err.Error()); updateErr != nil {
+			if updateErr := s.updateFAQImportProgressStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, len(payload.Entries), 0, "获取知识库失败", err.Error()); updateErr != nil {
 				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
 			}
 		}
 		return fmt.Errorf("failed to get knowledge base: %w", err)
 	}
 
-	// 检查任务状态 - 幂等性处理
-	if knowledge.ParseStatus == "completed" {
-		logger.Infof(ctx, "FAQ import already completed, skipping: %s", payload.TaskID)
-		return nil // 幂等：已完成的任务直接返回
-	}
-
-	// 检查已处理进度
-	importMeta, _ := types.ParseFAQImportMetadata(knowledge)
+	// 检查任务状态 - 幂等性处理（先检查Redis中的进度）
+	existingProgress, _ := s.GetFAQImportProgress(ctx, payload.TaskID)
 	var processedCount int
-	if importMeta != nil {
-		processedCount = importMeta.ImportProcessed
+	if existingProgress != nil {
+		if existingProgress.Status == types.FAQImportStatusCompleted {
+			logger.Infof(ctx, "FAQ import already completed, skipping: %s", payload.TaskID)
+			return nil // 幂等：已完成的任务直接返回
+		}
+		processedCount = existingProgress.Processed
 		logger.Infof(ctx, "Resuming FAQ import from progress: %d/%d", processedCount, len(payload.Entries))
 	}
 
@@ -4978,7 +5417,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 			logger.Errorf(ctx, "Failed to delete unindexed chunks: %v", err)
 			// 如果是最后一次重试，更新状态为失败
 			if isLastRetry {
-				if updateErr := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, originalTotalEntries, processedCount, err.Error()); updateErr != nil {
+				if updateErr := s.updateFAQImportProgressStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, originalTotalEntries, processedCount, "清理未索引数据失败", err.Error()); updateErr != nil {
 					logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
 				}
 			}
@@ -4998,7 +5437,7 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 				for _, chunk := range chunksDeleted {
 					chunkIDs = append(chunkIDs, chunk.ID)
 				}
-				if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions()); err != nil {
+				if err := retrieveEngine.DeleteByChunkIDList(ctx, chunkIDs, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
 					logger.Warnf(ctx, "Failed to delete index data for chunks (may not exist): %v", err)
 				} else {
 					logger.Infof(ctx, "Successfully deleted index data for %d chunks", len(chunksDeleted))
@@ -5020,8 +5459,8 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 	}
 
 	// 更新任务状态为运行中
-	if err := s.updateFAQImportStatusWithRanges(ctx, payload.TaskID, types.FAQImportStatusProcessing, 0,
-		originalTotalEntries, processedCount, ""); err != nil {
+	if err := s.updateFAQImportProgressStatus(ctx, payload.TaskID, types.FAQImportStatusProcessing, 0,
+		originalTotalEntries, processedCount, "开始处理导入任务", ""); err != nil {
 		logger.Errorf(ctx, "Failed to update task status to running: %v", err)
 	}
 
@@ -5037,12 +5476,12 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 		// 如果是最后一次重试，更新状态为失败
 		if isLastRetry {
 			// 获取当前已处理的进度
-			currentMeta, _ := types.ParseFAQImportMetadata(knowledge)
+			currentProgress, _ := s.GetFAQImportProgress(ctx, payload.TaskID)
 			currentProcessed := 0
-			if currentMeta != nil {
-				currentProcessed = currentMeta.ImportProcessed
+			if currentProgress != nil {
+				currentProcessed = currentProgress.Processed
 			}
-			if updateErr := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, originalTotalEntries, currentProcessed, err.Error()); updateErr != nil {
+			if updateErr := s.updateFAQImportProgressStatus(ctx, payload.TaskID, types.FAQImportStatusFailed, 0, originalTotalEntries, currentProcessed, "导入失败", err.Error()); updateErr != nil {
 				logger.Errorf(ctx, "Failed to update task status to failed: %v", updateErr)
 			}
 		}
@@ -5051,9 +5490,561 @@ func (s *knowledgeService) ProcessFAQImport(ctx context.Context, t *asynq.Task) 
 
 	// 任务成功完成
 	logger.Infof(ctx, "FAQ import task completed: %s", payload.TaskID)
-	if err := s.updateFAQImportStatus(ctx, payload.TaskID, types.FAQImportStatusCompleted, 100, originalTotalEntries, originalTotalEntries, ""); err != nil {
+	if err := s.updateFAQImportProgressStatus(ctx, payload.TaskID, types.FAQImportStatusCompleted, 100, originalTotalEntries, originalTotalEntries, "导入完成", ""); err != nil {
 		logger.Errorf(ctx, "Failed to update task status to success: %v", err)
 	}
 
 	return nil
+}
+
+const (
+	kbCloneProgressKeyPrefix = "kb_clone_progress:"
+	kbCloneProgressTTL       = 24 * time.Hour
+)
+
+// getKBCloneProgressKey returns the Redis key for storing KB clone progress
+func getKBCloneProgressKey(taskID string) string {
+	return kbCloneProgressKeyPrefix + taskID
+}
+
+const (
+	faqImportProgressKeyPrefix = "faq_import_progress:"
+	faqImportRunningKeyPrefix  = "faq_import_running:"
+	faqImportProgressTTL       = 3 * time.Hour
+)
+
+// getFAQImportProgressKey returns the Redis key for storing FAQ import progress
+func getFAQImportProgressKey(taskID string) string {
+	return faqImportProgressKeyPrefix + taskID
+}
+
+// getFAQImportRunningKey returns the Redis key for storing running task ID by KB ID
+func getFAQImportRunningKey(kbID string) string {
+	return faqImportRunningKeyPrefix + kbID
+}
+
+// saveFAQImportProgress saves the FAQ import progress to Redis
+func (s *knowledgeService) saveFAQImportProgress(ctx context.Context, progress *types.FAQImportProgress) error {
+	key := getFAQImportProgressKey(progress.TaskID)
+	progress.UpdatedAt = time.Now().Unix()
+	data, err := json.Marshal(progress)
+	if err != nil {
+		return fmt.Errorf("failed to marshal FAQ import progress: %w", err)
+	}
+	return s.redisClient.Set(ctx, key, data, faqImportProgressTTL).Err()
+}
+
+// GetFAQImportProgress retrieves the progress of an FAQ import task
+func (s *knowledgeService) GetFAQImportProgress(ctx context.Context, taskID string) (*types.FAQImportProgress, error) {
+	key := getFAQImportProgressKey(taskID)
+	data, err := s.redisClient.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, werrors.NewNotFoundError("FAQ import task not found")
+		}
+		return nil, fmt.Errorf("failed to get FAQ import progress from Redis: %w", err)
+	}
+
+	var progress types.FAQImportProgress
+	if err := json.Unmarshal(data, &progress); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal FAQ import progress: %w", err)
+	}
+	return &progress, nil
+}
+
+// ProcessKBClone handles Asynq knowledge base clone tasks
+func (s *knowledgeService) ProcessKBClone(ctx context.Context, t *asynq.Task) error {
+	var payload types.KBClonePayload
+	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+		return fmt.Errorf("failed to unmarshal KB clone payload: %w", err)
+	}
+
+	// Add tenant ID to context
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, payload.TenantID)
+
+	// Get tenant info and add to context
+	tenantInfo, err := s.tenantRepo.GetTenantByID(ctx, payload.TenantID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get tenant info: %v", err)
+		return fmt.Errorf("failed to get tenant info: %w", err)
+	}
+	ctx = context.WithValue(ctx, types.TenantInfoContextKey, tenantInfo)
+
+	// Check if this is the last retry
+	retryCount, _ := asynq.GetRetryCount(ctx)
+	maxRetry, _ := asynq.GetMaxRetry(ctx)
+	isLastRetry := retryCount >= maxRetry
+
+	logger.Infof(ctx, "Processing KB clone task: %s, source: %s, target: %s, retry: %d/%d",
+		payload.TaskID, payload.SourceID, payload.TargetID, retryCount, maxRetry)
+
+	// Helper function to handle errors - only mark as failed on last retry
+	handleError := func(progress *types.KBCloneProgress, err error, message string) {
+		if isLastRetry {
+			progress.Status = types.KBCloneStatusFailed
+			progress.Error = err.Error()
+			progress.Message = message
+			progress.UpdatedAt = time.Now().Unix()
+			_ = s.saveKBCloneProgress(ctx, progress)
+		}
+	}
+
+	// Update progress to processing
+	progress := &types.KBCloneProgress{
+		TaskID:    payload.TaskID,
+		SourceID:  payload.SourceID,
+		TargetID:  payload.TargetID,
+		Status:    types.KBCloneStatusProcessing,
+		Progress:  0,
+		Message:   "Starting knowledge base clone...",
+		UpdatedAt: time.Now().Unix(),
+	}
+	if err := s.saveKBCloneProgress(ctx, progress); err != nil {
+		logger.Errorf(ctx, "Failed to update KB clone progress: %v", err)
+	}
+
+	// Get source and target knowledge bases
+	srcKB, dstKB, err := s.kbService.CopyKnowledgeBase(ctx, payload.SourceID, payload.TargetID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to copy knowledge base: %v", err)
+		handleError(progress, err, "Failed to copy knowledge base configuration")
+		return err
+	}
+
+	// Use different sync strategies based on knowledge base type
+	if srcKB.Type == types.KnowledgeBaseTypeFAQ {
+		return s.cloneFAQKnowledgeBase(ctx, srcKB, dstKB, progress, handleError)
+	}
+
+	// Document type: use Knowledge-level diff based on file_hash
+	addKnowledge, err := s.repo.AminusB(ctx, srcKB.TenantID, srcKB.ID, dstKB.TenantID, dstKB.ID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get knowledge to add: %v", err)
+		handleError(progress, err, "Failed to calculate knowledge difference")
+		return err
+	}
+
+	delKnowledge, err := s.repo.AminusB(ctx, dstKB.TenantID, dstKB.ID, srcKB.TenantID, srcKB.ID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get knowledge to delete: %v", err)
+		handleError(progress, err, "Failed to calculate knowledge difference")
+		return err
+	}
+
+	totalOperations := len(addKnowledge) + len(delKnowledge)
+	progress.Total = totalOperations
+	progress.Message = fmt.Sprintf("Found %d knowledge to add, %d to delete", len(addKnowledge), len(delKnowledge))
+	progress.UpdatedAt = time.Now().Unix()
+	_ = s.saveKBCloneProgress(ctx, progress)
+
+	logger.Infof(ctx, "Knowledge after update to add: %d, delete: %d", len(addKnowledge), len(delKnowledge))
+
+	processedCount := 0
+	batch := 10
+
+	// Delete knowledge in target that doesn't exist in source
+	g, gctx := errgroup.WithContext(ctx)
+	for ids := range slices.Chunk(delKnowledge, batch) {
+		g.Go(func() error {
+			err := s.DeleteKnowledgeList(gctx, ids)
+			if err != nil {
+				logger.Errorf(gctx, "delete partial knowledge %v: %v", ids, err)
+				return err
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		logger.Errorf(ctx, "delete total knowledge %d: %v", len(delKnowledge), err)
+		handleError(progress, err, "Failed to delete knowledge")
+		return err
+	}
+
+	processedCount += len(delKnowledge)
+	if totalOperations > 0 {
+		progress.Progress = processedCount * 100 / totalOperations
+	}
+	progress.Processed = processedCount
+	progress.Message = fmt.Sprintf("Deleted %d knowledge, cloning %d...", len(delKnowledge), len(addKnowledge))
+	progress.UpdatedAt = time.Now().Unix()
+	_ = s.saveKBCloneProgress(ctx, progress)
+
+	// Clone knowledge from source to target
+	g, gctx = errgroup.WithContext(ctx)
+	g.SetLimit(batch)
+	for _, knowledge := range addKnowledge {
+		g.Go(func() error {
+			srcKn, err := s.repo.GetKnowledgeByID(gctx, srcKB.TenantID, knowledge)
+			if err != nil {
+				logger.Errorf(gctx, "get knowledge %s: %v", knowledge, err)
+				return err
+			}
+			err = s.cloneKnowledge(gctx, srcKn, dstKB)
+			if err != nil {
+				logger.Errorf(gctx, "clone knowledge %s: %v", knowledge, err)
+				return err
+			}
+
+			// Update progress
+			processedCount++
+			if totalOperations > 0 {
+				progress.Progress = processedCount * 100 / totalOperations
+			}
+			progress.Processed = processedCount
+			progress.Message = fmt.Sprintf("Cloned %d/%d knowledge", processedCount-len(delKnowledge), len(addKnowledge))
+			progress.UpdatedAt = time.Now().Unix()
+			_ = s.saveKBCloneProgress(ctx, progress)
+
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		logger.Errorf(ctx, "add total knowledge %d: %v", len(addKnowledge), err)
+		handleError(progress, err, "Failed to clone knowledge")
+		return err
+	}
+
+	// Mark as completed
+	progress.Status = types.KBCloneStatusCompleted
+	progress.Progress = 100
+	progress.Processed = totalOperations
+	progress.Message = "Knowledge base clone completed successfully"
+	progress.UpdatedAt = time.Now().Unix()
+	if err := s.saveKBCloneProgress(ctx, progress); err != nil {
+		logger.Errorf(ctx, "Failed to update KB clone progress to completed: %v", err)
+	}
+
+	logger.Infof(ctx, "KB clone task completed: %s", payload.TaskID)
+	return nil
+}
+
+// cloneFAQKnowledgeBase handles FAQ knowledge base cloning with chunk-level incremental sync
+func (s *knowledgeService) cloneFAQKnowledgeBase(
+	ctx context.Context,
+	srcKB, dstKB *types.KnowledgeBase,
+	progress *types.KBCloneProgress,
+	handleError func(*types.KBCloneProgress, error, string),
+) error {
+	// Get source FAQ knowledge first (FAQ KB has exactly one Knowledge entry)
+	srcKnowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, srcKB.TenantID, srcKB.ID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get source FAQ knowledge: %v", err)
+		handleError(progress, err, "Failed to get source FAQ knowledge")
+		return err
+	}
+	if len(srcKnowledgeList) == 0 {
+		// Source has no FAQ knowledge, nothing to clone
+		progress.Status = types.KBCloneStatusCompleted
+		progress.Progress = 100
+		progress.Message = "Source FAQ knowledge base is empty"
+		progress.UpdatedAt = time.Now().Unix()
+		_ = s.saveKBCloneProgress(ctx, progress)
+		return nil
+	}
+	srcKnowledge := srcKnowledgeList[0]
+
+	// Get chunk-level differences based on content_hash
+	chunksToAdd, chunksToDelete, err := s.chunkRepo.FAQChunkDiff(ctx, srcKB.TenantID, srcKB.ID, dstKB.TenantID, dstKB.ID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to calculate FAQ chunk difference: %v", err)
+		handleError(progress, err, "Failed to calculate FAQ chunk difference")
+		return err
+	}
+
+	totalOperations := len(chunksToAdd) + len(chunksToDelete)
+	progress.Total = totalOperations
+	progress.Message = fmt.Sprintf("Found %d FAQ entries to add, %d to delete", len(chunksToAdd), len(chunksToDelete))
+	progress.UpdatedAt = time.Now().Unix()
+	_ = s.saveKBCloneProgress(ctx, progress)
+
+	logger.Infof(ctx, "FAQ chunks to add: %d, delete: %d", len(chunksToAdd), len(chunksToDelete))
+
+	// If nothing to do, mark as completed
+	if totalOperations == 0 {
+		progress.Status = types.KBCloneStatusCompleted
+		progress.Progress = 100
+		progress.Message = "FAQ knowledge base is already in sync"
+		progress.UpdatedAt = time.Now().Unix()
+		_ = s.saveKBCloneProgress(ctx, progress)
+		return nil
+	}
+
+	// Get tenant info and initialize retrieve engine
+	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
+	retrieveEngine, err := retriever.NewCompositeRetrieveEngine(s.retrieveEngine, tenantInfo.GetEffectiveEngines())
+	if err != nil {
+		logger.Errorf(ctx, "Failed to init retrieve engine: %v", err)
+		handleError(progress, err, "Failed to initialize retrieve engine")
+		return err
+	}
+
+	// Get embedding model
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, dstKB.EmbeddingModelID)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get embedding model: %v", err)
+		handleError(progress, err, "Failed to get embedding model")
+		return err
+	}
+
+	processedCount := 0
+
+	// Delete FAQ chunks that don't exist in source
+	if len(chunksToDelete) > 0 {
+		// Delete from vector store
+		if err := retrieveEngine.DeleteByChunkIDList(ctx, chunksToDelete, embeddingModel.GetDimensions(), types.KnowledgeTypeFAQ); err != nil {
+			logger.Errorf(ctx, "Failed to delete FAQ chunks from vector store: %v", err)
+			handleError(progress, err, "Failed to delete FAQ entries from vector store")
+			return err
+		}
+		// Delete from database
+		if err := s.chunkRepo.DeleteChunks(ctx, dstKB.TenantID, chunksToDelete); err != nil {
+			logger.Errorf(ctx, "Failed to delete FAQ chunks from database: %v", err)
+			handleError(progress, err, "Failed to delete FAQ entries from database")
+			return err
+		}
+		processedCount += len(chunksToDelete)
+		if totalOperations > 0 {
+			progress.Progress = processedCount * 100 / totalOperations
+		}
+		progress.Processed = processedCount
+		progress.Message = fmt.Sprintf("Deleted %d FAQ entries, adding %d...", len(chunksToDelete), len(chunksToAdd))
+		progress.UpdatedAt = time.Now().Unix()
+		_ = s.saveKBCloneProgress(ctx, progress)
+	}
+
+	// Get or create the FAQ knowledge entry in destination
+	dstKnowledge, err := s.getOrCreateFAQKnowledge(ctx, dstKB, srcKnowledge)
+	if err != nil {
+		logger.Errorf(ctx, "Failed to get or create FAQ knowledge: %v", err)
+		handleError(progress, err, "Failed to prepare FAQ knowledge entry")
+		return err
+	}
+
+	// Clone FAQ chunks from source to destination
+	batch := 50
+	tagIDMapping := map[string]string{} // srcTagID -> dstTagID
+	for i := 0; i < len(chunksToAdd); i += batch {
+		end := i + batch
+		if end > len(chunksToAdd) {
+			end = len(chunksToAdd)
+		}
+		batchIDs := chunksToAdd[i:end]
+
+		// Get source chunks
+		srcChunks, err := s.chunkRepo.ListChunksByID(ctx, srcKB.TenantID, batchIDs)
+		if err != nil {
+			logger.Errorf(ctx, "Failed to get source FAQ chunks: %v", err)
+			handleError(progress, err, "Failed to get source FAQ entries")
+			return err
+		}
+
+		// Create new chunks for destination
+		newChunks := make([]*types.Chunk, 0, len(srcChunks))
+		for _, srcChunk := range srcChunks {
+			// Map TagID to target knowledge base
+			targetTagID := ""
+			if srcChunk.TagID != "" {
+				if mappedTagID, ok := tagIDMapping[srcChunk.TagID]; ok {
+					targetTagID = mappedTagID
+				} else {
+					// Try to find or create the tag in target knowledge base
+					targetTagID = s.getOrCreateTagInTarget(ctx, srcKB.TenantID, dstKB.TenantID, dstKB.ID, srcChunk.TagID, tagIDMapping)
+				}
+			}
+
+			newChunk := &types.Chunk{
+				ID:              uuid.New().String(),
+				TenantID:        dstKB.TenantID,
+				KnowledgeID:     dstKnowledge.ID,
+				KnowledgeBaseID: dstKB.ID,
+				TagID:           targetTagID,
+				Content:         srcChunk.Content,
+				ChunkIndex:      srcChunk.ChunkIndex,
+				IsEnabled:       srcChunk.IsEnabled,
+				Flags:           srcChunk.Flags,
+				ChunkType:       types.ChunkTypeFAQ,
+				Metadata:        srcChunk.Metadata,
+				ContentHash:     srcChunk.ContentHash,
+				ImageInfo:       srcChunk.ImageInfo,
+				Status:          int(types.ChunkStatusStored), // Initially stored, will be indexed
+				CreatedAt:       time.Now(),
+				UpdatedAt:       time.Now(),
+			}
+			newChunks = append(newChunks, newChunk)
+		}
+
+		// Save to database
+		if err := s.chunkRepo.CreateChunks(ctx, newChunks); err != nil {
+			logger.Errorf(ctx, "Failed to create FAQ chunks: %v", err)
+			handleError(progress, err, "Failed to create FAQ entries")
+			return err
+		}
+
+		// Index in vector store using existing method
+		// This will index standard question + similar questions based on FAQConfig
+		if err := s.indexFAQChunks(ctx, dstKB, dstKnowledge, newChunks, embeddingModel, false, false); err != nil {
+			logger.Errorf(ctx, "Failed to index FAQ chunks: %v", err)
+			handleError(progress, err, "Failed to index FAQ entries")
+			return err
+		}
+
+		// Update chunk status to indexed
+		for _, chunk := range newChunks {
+			chunk.Status = int(types.ChunkStatusIndexed)
+		}
+		if err := s.chunkService.UpdateChunks(ctx, newChunks); err != nil {
+			logger.Warnf(ctx, "Failed to update FAQ chunks status: %v", err)
+			// Don't fail the whole operation for status update failure
+		}
+
+		processedCount += len(batchIDs)
+		if totalOperations > 0 {
+			progress.Progress = processedCount * 100 / totalOperations
+		}
+		progress.Processed = processedCount
+		progress.Message = fmt.Sprintf("Added %d/%d FAQ entries", processedCount-len(chunksToDelete), len(chunksToAdd))
+		progress.UpdatedAt = time.Now().Unix()
+		_ = s.saveKBCloneProgress(ctx, progress)
+	}
+
+	// Mark as completed
+	progress.Status = types.KBCloneStatusCompleted
+	progress.Progress = 100
+	progress.Processed = totalOperations
+	progress.Message = "FAQ knowledge base clone completed successfully"
+	progress.UpdatedAt = time.Now().Unix()
+	if err := s.saveKBCloneProgress(ctx, progress); err != nil {
+		logger.Errorf(ctx, "Failed to update KB clone progress to completed: %v", err)
+	}
+
+	return nil
+}
+
+// getOrCreateFAQKnowledge gets or creates the FAQ knowledge entry for a knowledge base
+// If srcKnowledge is provided, it will copy relevant fields from source when creating new knowledge
+func (s *knowledgeService) getOrCreateFAQKnowledge(ctx context.Context, kb *types.KnowledgeBase, srcKnowledge *types.Knowledge) (*types.Knowledge, error) {
+	// FAQ knowledge base should have exactly one Knowledge entry
+	knowledgeList, err := s.repo.ListKnowledgeByKnowledgeBaseID(ctx, kb.TenantID, kb.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(knowledgeList) > 0 {
+		return knowledgeList[0], nil
+	}
+
+	// Create a new FAQ knowledge entry, copying from source if available
+	knowledge := &types.Knowledge{
+		ID:               uuid.New().String(),
+		TenantID:         kb.TenantID,
+		KnowledgeBaseID:  kb.ID,
+		Type:             types.KnowledgeTypeFAQ,
+		Title:            "FAQ",
+		ParseStatus:      "completed",
+		EnableStatus:     "enabled",
+		EmbeddingModelID: kb.EmbeddingModelID,
+	}
+
+	// Copy additional fields from source knowledge if available
+	if srcKnowledge != nil {
+		knowledge.Title = srcKnowledge.Title
+		knowledge.Description = srcKnowledge.Description
+		knowledge.Source = srcKnowledge.Source
+		knowledge.Metadata = srcKnowledge.Metadata
+	}
+
+	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
+		return nil, err
+	}
+	return knowledge, nil
+}
+
+// saveKBCloneProgress saves the KB clone progress to Redis
+func (s *knowledgeService) saveKBCloneProgress(ctx context.Context, progress *types.KBCloneProgress) error {
+	key := getKBCloneProgressKey(progress.TaskID)
+	data, err := json.Marshal(progress)
+	if err != nil {
+		return fmt.Errorf("failed to marshal progress: %w", err)
+	}
+	return s.redisClient.Set(ctx, key, data, kbCloneProgressTTL).Err()
+}
+
+// SaveKBCloneProgress saves the KB clone progress to Redis (public method for handler use)
+func (s *knowledgeService) SaveKBCloneProgress(ctx context.Context, progress *types.KBCloneProgress) error {
+	return s.saveKBCloneProgress(ctx, progress)
+}
+
+// GetKBCloneProgress retrieves the progress of a knowledge base clone task
+func (s *knowledgeService) GetKBCloneProgress(ctx context.Context, taskID string) (*types.KBCloneProgress, error) {
+	key := getKBCloneProgressKey(taskID)
+	data, err := s.redisClient.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, werrors.NewNotFoundError("KB clone task not found")
+		}
+		return nil, fmt.Errorf("failed to get progress from Redis: %w", err)
+	}
+
+	var progress types.KBCloneProgress
+	if err := json.Unmarshal(data, &progress); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal progress: %w", err)
+	}
+	return &progress, nil
+}
+
+// getOrCreateTagInTarget finds or creates a tag in the target knowledge base based on the source tag.
+// It looks up the source tag by ID, then tries to find a tag with the same name in the target KB.
+// If not found, it creates a new tag with the same properties.
+// The mapping is cached in tagIDMapping for subsequent lookups.
+func (s *knowledgeService) getOrCreateTagInTarget(
+	ctx context.Context,
+	srcTenantID, dstTenantID uint64,
+	dstKnowledgeBaseID string,
+	srcTagID string,
+	tagIDMapping map[string]string,
+) string {
+	// Get source tag
+	srcTag, err := s.tagRepo.GetByID(ctx, srcTenantID, srcTagID)
+	if err != nil || srcTag == nil {
+		logger.Warnf(ctx, "Failed to get source tag %s: %v", srcTagID, err)
+		tagIDMapping[srcTagID] = "" // Cache empty result to avoid repeated lookups
+		return ""
+	}
+
+	// Try to find existing tag with same name in target KB
+	dstTag, err := s.tagRepo.GetByName(ctx, dstTenantID, dstKnowledgeBaseID, srcTag.Name)
+	if err == nil && dstTag != nil {
+		tagIDMapping[srcTagID] = dstTag.ID
+		return dstTag.ID
+	}
+
+	// Create new tag in target KB
+	newTag := &types.KnowledgeTag{
+		ID:              uuid.New().String(),
+		TenantID:        dstTenantID,
+		KnowledgeBaseID: dstKnowledgeBaseID,
+		Name:            srcTag.Name,
+		Color:           srcTag.Color,
+		SortOrder:       srcTag.SortOrder,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := s.tagRepo.Create(ctx, newTag); err != nil {
+		logger.Warnf(ctx, "Failed to create tag %s in target KB: %v", srcTag.Name, err)
+		tagIDMapping[srcTagID] = "" // Cache empty result
+		return ""
+	}
+
+	tagIDMapping[srcTagID] = newTag.ID
+	logger.Infof(ctx, "Created tag %s (ID: %s) in target KB %s", newTag.Name, newTag.ID, dstKnowledgeBaseID)
+	return newTag.ID
+}
+
+// SearchKnowledge searches knowledge items by keyword across the tenant
+func (s *knowledgeService) SearchKnowledge(ctx context.Context, keyword string, offset, limit int) ([]*types.Knowledge, bool, error) {
+	tenantID, ok := ctx.Value(types.TenantIDContextKey).(uint64)
+	if !ok {
+		return nil, false, werrors.NewUnauthorizedError("Tenant ID not found in context")
+	}
+	return s.repo.SearchKnowledge(ctx, tenantID, keyword, offset, limit)
 }

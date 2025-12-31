@@ -18,6 +18,7 @@ const createMenuChildren = () => reactive<MenuChild[]>([])
 export const useMenuStore = defineStore('menuStore', () => {
   const menuArr = reactive<MenuItem[]>([
     { title: '', titleKey: 'menu.knowledgeBase', icon: 'zhishiku', path: 'knowledge-bases' },
+    { title: '', titleKey: 'menu.agents', icon: 'agent', path: 'agents' },
     {
       title: '',
       titleKey: 'menu.chat',
@@ -32,6 +33,7 @@ export const useMenuStore = defineStore('menuStore', () => {
 
   const isFirstSession = ref(false)
   const firstQuery = ref('')
+  const firstMentionedItems = ref<any[]>([])
 
   const applyMenuTranslations = () => {
     menuArr.forEach(item => {
@@ -51,14 +53,14 @@ export const useMenuStore = defineStore('menuStore', () => {
   )
 
   const clearMenuArr = () => {
-    const chatMenu = menuArr[1]
+    const chatMenu = menuArr[2]
     if (chatMenu && chatMenu.children) {
       chatMenu.children = createMenuChildren()
     }
   }
 
   const updatemenuArr = (obj: any) => {
-    const chatMenu = menuArr[1]
+    const chatMenu = menuArr[2]
     if (!chatMenu.children) {
       chatMenu.children = createMenuChildren()
     }
@@ -69,7 +71,7 @@ export const useMenuStore = defineStore('menuStore', () => {
   }
 
   const updataMenuChildren = (item: MenuChild) => {
-    const chatMenu = menuArr[1]
+    const chatMenu = menuArr[2]
     if (!chatMenu.children) {
       chatMenu.children = createMenuChildren()
     }
@@ -77,7 +79,7 @@ export const useMenuStore = defineStore('menuStore', () => {
   }
 
   const updatasessionTitle = (sessionId: string, title: string) => {
-    const chatMenu = menuArr[1]
+    const chatMenu = menuArr[2]
     chatMenu.children?.forEach((item: MenuChild) => {
       if (item.id === sessionId) {
         item.title = title
@@ -90,14 +92,16 @@ export const useMenuStore = defineStore('menuStore', () => {
     isFirstSession.value = payload
   }
 
-  const changeFirstQuery = (payload: string) => {
+  const changeFirstQuery = (payload: string, mentionedItems: any[] = []) => {
     firstQuery.value = payload
+    firstMentionedItems.value = mentionedItems
   }
 
   return {
     menuArr,
     isFirstSession,
     firstQuery,
+    firstMentionedItems,
     clearMenuArr,
     updatemenuArr,
     updataMenuChildren,

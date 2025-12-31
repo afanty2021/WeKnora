@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
 
 // 定义设置接口
 interface Settings {
@@ -8,10 +9,12 @@ interface Settings {
   isAgentEnabled: boolean;
   agentConfig: AgentConfig;
   selectedKnowledgeBases: string[];  // 当前选中的知识库ID列表
+  selectedFiles: string[]; // 当前选中的文件ID列表
   modelConfig: ModelConfig;  // 模型配置
   ollamaConfig: OllamaConfig;  // Ollama配置
   webSearchEnabled: boolean;  // 网络搜索是否启用
   conversationModels: ConversationModels;
+  selectedAgentId: string;  // 当前选中的智能体ID
 }
 
 // Agent 配置接口
@@ -19,14 +22,13 @@ interface AgentConfig {
   maxIterations: number;
   temperature: number;
   allowedTools: string[];
-  system_prompt_web_enabled?: string;
-  system_prompt_web_disabled?: string;
-  use_custom_system_prompt?: boolean;
+  system_prompt?: string;  // Unified system prompt (uses {{web_search_status}} placeholder)
 }
 
 interface ConversationModels {
   summaryModelId: string;
   rerankModelId: string;
+  selectedChatModelId: string;  // 用户当前选择的对话模型ID
 }
 
 // 单个模型项接口
@@ -66,11 +68,10 @@ const defaultSettings: Settings = {
     maxIterations: 5,
     temperature: 0.7,
     allowedTools: [],  // 默认为空，需要通过 API 从后端加载
-    system_prompt_web_enabled: "",
-    system_prompt_web_disabled: "",
-    use_custom_system_prompt: false
+    system_prompt: "",
   },
   selectedKnowledgeBases: [],  // 默认为空数组
+  selectedFiles: [], // 默认为空数组
   modelConfig: {
     chatModels: [],
     embeddingModels: [],
@@ -85,7 +86,9 @@ const defaultSettings: Settings = {
   conversationModels: {
     summaryModelId: "",
     rerankModelId: "",
-  }
+    selectedChatModelId: "",  // 用户当前选择的对话模型ID
+  },
+  selectedAgentId: BUILTIN_QUICK_ANSWER_ID,  // 默认选中快速问答模式
 };
 
 export const useSettingsStore = defineStore("settings", {
@@ -110,6 +113,16 @@ export const useSettingsStore = defineStore("settings", {
       )
     },
     
+    // 普通模式（快速回答）是否就绪
+    // 需要满足：1) 设置了对话模型 2) 设置了重排模型
+    isNormalModeReady: (state) => {
+      const models = state.settings.conversationModels || defaultSettings.conversationModels
+      return Boolean(
+        models.summaryModelId && models.summaryModelId.trim() !== '' &&
+        models.rerankModelId && models.rerankModelId.trim() !== ''
+      )
+    },
+    
     // 获取 Agent 配置
     agentConfig: (state) => state.settings.agentConfig || defaultSettings.agentConfig,
 
@@ -120,6 +133,9 @@ export const useSettingsStore = defineStore("settings", {
     
     // 网络搜索是否启用
     isWebSearchEnabled: (state) => state.settings.webSearchEnabled || false,
+    
+    // 当前选中的智能体ID
+    selectedAgentId: (state) => state.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
   },
 
   actions: {
@@ -273,5 +289,54 @@ export const useSettingsStore = defineStore("settings", {
       this.settings.webSearchEnabled = enabled;
       localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
     },
+
+    // File selection actions
+    addFile(fileId: string) {
+      if (!this.settings.selectedFiles) this.settings.selectedFiles = [];
+      if (!this.settings.selectedFiles.includes(fileId)) {
+        this.settings.selectedFiles.push(fileId);
+        localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+      }
+    },
+
+    removeFile(fileId: string) {
+      if (!this.settings.selectedFiles) return;
+      this.settings.selectedFiles = this.settings.selectedFiles.filter((id: string) => id !== fileId);
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+
+    clearFiles() {
+      this.settings.selectedFiles = [];
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+    
+    getSelectedFiles(): string[] {
+      return this.settings.selectedFiles || [];
+    },
+    
+    // 选择智能体
+    selectAgent(agentId: string) {
+      this.settings.selectedAgentId = agentId;
+      // 根据智能体类型自动切换 Agent 模式
+      if (agentId === BUILTIN_QUICK_ANSWER_ID) {
+        this.settings.isAgentEnabled = false;
+      } else if (agentId === BUILTIN_SMART_REASONING_ID) {
+        this.settings.isAgentEnabled = true;
+      }
+      // 自定义智能体需要根据其配置来决定
+      
+      // 切换智能体时重置知识库和文件选择状态
+      // 因为不同智能体关联的知识库不同，需要清空用户之前的选择
+      this.settings.selectedKnowledgeBases = [];
+      this.settings.selectedFiles = [];
+      
+      localStorage.setItem("WeKnora_settings", JSON.stringify(this.settings));
+    },
+    
+    // 获取选中的智能体ID
+    getSelectedAgentId(): string {
+      return this.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID;
+    },
   },
-}); 
+});
+ 

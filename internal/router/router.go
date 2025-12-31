@@ -5,6 +5,8 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 	"go.uber.org/dig"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -12,6 +14,8 @@ import (
 	"github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+
+	_ "github.com/Tencent/WeKnora/docs" // swagger docs
 )
 
 // RouterParams 路由参数
@@ -43,6 +47,7 @@ type RouterParams struct {
 	WebSearchHandler      *handler.WebSearchHandler
 	FAQHandler            *handler.FAQHandler
 	TagHandler            *handler.TagHandler
+	CustomAgentHandler    *handler.CustomAgentHandler
 }
 
 // NewRouter 创建新的路由
@@ -59,20 +64,33 @@ func NewRouter(params RouterParams) *gin.Engine {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// 其他中间件
+	// 基础中间件（不需要认证）
 	r.Use(middleware.RequestID())
 	r.Use(middleware.Logger())
 	r.Use(middleware.Recovery())
 	r.Use(middleware.ErrorHandler())
+
+	// 健康检查（不需要认证）
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+
+	// Swagger API 文档（仅在非生产环境下启用）
+	// 通过 GIN_MODE 环境变量判断：release 模式下禁用 Swagger
+	if gin.Mode() != gin.ReleaseMode {
+		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler,
+			ginSwagger.DefaultModelsExpandDepth(-1), // 默认折叠 Models
+			ginSwagger.DocExpansion("list"),         // 展开模式: "list"(展开标签), "full"(全部展开), "none"(全部折叠)
+			ginSwagger.DeepLinking(true),            // 启用深度链接
+			ginSwagger.PersistAuthorization(true),   // 持久化认证信息
+		))
+	}
+
+	// 认证中间件
 	r.Use(middleware.Auth(params.TenantService, params.UserService, params.Config))
 
 	// 添加OpenTelemetry追踪中间件
 	r.Use(middleware.TracingMiddleware())
-
-	// 健康检查
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
 
 	// 需要认证的API路由
 	v1 := r.Group("/api/v1")
@@ -93,6 +111,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 		RegisterSystemRoutes(v1, params.SystemHandler)
 		RegisterMCPServiceRoutes(v1, params.MCPServiceHandler)
 		RegisterWebSearchRoutes(v1, params.WebSearchHandler)
+		RegisterCustomAgentRoutes(v1, params.CustomAgentHandler)
 	}
 
 	return r
@@ -152,6 +171,8 @@ func RegisterKnowledgeRoutes(r *gin.RouterGroup, handler *handler.KnowledgeHandl
 		k.PUT("/image/:id/:chunk_id", handler.UpdateImageInfo)
 		// 批量更新知识标签
 		k.PUT("/tags", handler.UpdateKnowledgeTagBatch)
+		// 搜索知识
+		k.GET("/search", handler.SearchKnowledge)
 	}
 }
 
@@ -163,6 +184,8 @@ func RegisterFAQRoutes(r *gin.RouterGroup, handler *handler.FAQHandler) {
 	faq := r.Group("/knowledge-bases/:id/faq")
 	{
 		faq.GET("/entries", handler.ListEntries)
+		faq.GET("/entries/export", handler.ExportEntries)
+		faq.GET("/entries/:entry_id", handler.GetEntry)
 		faq.POST("/entries", handler.UpsertEntries)
 		faq.POST("/entry", handler.CreateEntry)
 		faq.PUT("/entries/:entry_id", handler.UpdateEntry)
@@ -171,6 +194,11 @@ func RegisterFAQRoutes(r *gin.RouterGroup, handler *handler.FAQHandler) {
 		faq.PUT("/entries/tags", handler.UpdateEntryTagBatch)
 		faq.DELETE("/entries", handler.DeleteEntries)
 		faq.POST("/search", handler.SearchFAQ)
+	}
+	// FAQ import progress route (outside of knowledge-base scope)
+	faqImport := r.Group("/faq/import")
+	{
+		faqImport.GET("/progress/:task_id", handler.GetImportProgress)
 	}
 }
 
@@ -193,6 +221,8 @@ func RegisterKnowledgeBaseRoutes(r *gin.RouterGroup, handler *handler.KnowledgeB
 		kb.GET("/:id/hybrid-search", handler.HybridSearch)
 		// 拷贝知识库
 		kb.POST("/copy", handler.CopyKnowledgeBase)
+		// 获取知识库复制进度
+		kb.GET("/copy/progress/:task_id", handler.GetKBCloneProgress)
 	}
 }
 
@@ -285,6 +315,8 @@ func RegisterModelRoutes(r *gin.RouterGroup, handler *handler.ModelHandler) {
 	// 模型路由组
 	models := r.Group("/models")
 	{
+		// 获取模型厂商列表
+		models.GET("/providers", handler.ListModelProviders)
 		// 创建模型
 		models.POST("", handler.CreateModel)
 		// 获取模型列表
@@ -347,6 +379,7 @@ func RegisterSystemRoutes(r *gin.RouterGroup, handler *handler.SystemHandler) {
 	systemRoutes := r.Group("/system")
 	{
 		systemRoutes.GET("/info", handler.GetSystemInfo)
+		systemRoutes.GET("/minio/buckets", handler.ListMinioBuckets)
 	}
 }
 
@@ -380,5 +413,26 @@ func RegisterWebSearchRoutes(r *gin.RouterGroup, webSearchHandler *handler.WebSe
 	{
 		// Get available providers
 		webSearch.GET("/providers", webSearchHandler.GetProviders)
+	}
+}
+
+// RegisterCustomAgentRoutes registers custom agent routes
+func RegisterCustomAgentRoutes(r *gin.RouterGroup, agentHandler *handler.CustomAgentHandler) {
+	agents := r.Group("/agents")
+	{
+		// Get placeholder definitions (must be before /:id to avoid conflict)
+		agents.GET("/placeholders", agentHandler.GetPlaceholders)
+		// Create custom agent
+		agents.POST("", agentHandler.CreateAgent)
+		// List all agents (including built-in)
+		agents.GET("", agentHandler.ListAgents)
+		// Get agent by ID
+		agents.GET("/:id", agentHandler.GetAgent)
+		// Update agent
+		agents.PUT("/:id", agentHandler.UpdateAgent)
+		// Delete agent
+		agents.DELETE("/:id", agentHandler.DeleteAgent)
+		// Copy agent
+		agents.POST("/:id/copy", agentHandler.CopyAgent)
 	}
 }

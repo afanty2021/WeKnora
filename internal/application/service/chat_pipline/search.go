@@ -17,29 +17,35 @@ import (
 
 // PluginSearch implements search functionality for chat pipeline
 type PluginSearch struct {
-	knowledgeBaseService interfaces.KnowledgeBaseService
-	knowledgeService     interfaces.KnowledgeService
-	config               *config.Config
-	webSearchService     interfaces.WebSearchService
-	tenantService        interfaces.TenantService
-	sessionService       interfaces.SessionService
+	knowledgeBaseService  interfaces.KnowledgeBaseService
+	knowledgeService      interfaces.KnowledgeService
+	chunkService          interfaces.ChunkService
+	config                *config.Config
+	webSearchService      interfaces.WebSearchService
+	tenantService         interfaces.TenantService
+	sessionService        interfaces.SessionService
+	webSearchStateService interfaces.WebSearchStateService
 }
 
 func NewPluginSearch(eventManager *EventManager,
 	knowledgeBaseService interfaces.KnowledgeBaseService,
 	knowledgeService interfaces.KnowledgeService,
+	chunkService interfaces.ChunkService,
 	config *config.Config,
 	webSearchService interfaces.WebSearchService,
 	tenantService interfaces.TenantService,
 	sessionService interfaces.SessionService,
+	webSearchStateService interfaces.WebSearchStateService,
 ) *PluginSearch {
 	res := &PluginSearch{
-		knowledgeBaseService: knowledgeBaseService,
-		knowledgeService:     knowledgeService,
-		config:               config,
-		webSearchService:     webSearchService,
-		tenantService:        tenantService,
-		sessionService:       sessionService,
+		knowledgeBaseService:  knowledgeBaseService,
+		knowledgeService:      knowledgeService,
+		chunkService:          chunkService,
+		config:                config,
+		webSearchService:      webSearchService,
+		tenantService:         tenantService,
+		sessionService:        sessionService,
+		webSearchStateService: webSearchStateService,
 	}
 	eventManager.Register(res)
 	return res
@@ -54,35 +60,26 @@ func (p *PluginSearch) ActivationEvents() []types.EventType {
 func (p *PluginSearch) OnEvent(ctx context.Context,
 	eventType types.EventType, chatManage *types.ChatManage, next func() *PluginError,
 ) *PluginError {
-	// Get knowledge base IDs list
-	knowledgeBaseIDs := chatManage.KnowledgeBaseIDs
-	if len(knowledgeBaseIDs) == 0 && chatManage.KnowledgeBaseID != "" {
-		// Fall back to single knowledge base
-		knowledgeBaseIDs = []string{chatManage.KnowledgeBaseID}
-		pipelineInfo(ctx, "Search", "fallback_kb", map[string]interface{}{
-			"session_id": chatManage.SessionID,
-			"kb_id":      chatManage.KnowledgeBaseID,
-		})
-	}
-
-	if len(knowledgeBaseIDs) == 0 {
+	// Check if we have search targets or web search enabled
+	hasKBTargets := len(chatManage.SearchTargets) > 0 || len(chatManage.KnowledgeBaseIDs) > 0 || len(chatManage.KnowledgeIDs) > 0
+	if !hasKBTargets && !chatManage.WebSearchEnabled {
 		pipelineError(ctx, "Search", "kb_not_found", map[string]interface{}{
 			"session_id": chatManage.SessionID,
 		})
-		return ErrSearch.WithError(nil)
+		return nil
 	}
 
 	pipelineInfo(ctx, "Search", "input", map[string]interface{}{
-		"session_id":    chatManage.SessionID,
-		"rewrite_query": chatManage.RewriteQuery,
-		"kb_ids":        strings.Join(knowledgeBaseIDs, ","),
-		"tenant_id":     chatManage.TenantID,
-		"web_enabled":   chatManage.WebSearchEnabled,
+		"session_id":     chatManage.SessionID,
+		"rewrite_query":  chatManage.RewriteQuery,
+		"search_targets": len(chatManage.SearchTargets),
+		"tenant_id":      chatManage.TenantID,
+		"web_enabled":    chatManage.WebSearchEnabled,
 	})
 
 	// Run KB search and web search concurrently
 	pipelineInfo(ctx, "Search", "plan", map[string]interface{}{
-		"kb_count":          len(knowledgeBaseIDs),
+		"search_targets":    len(chatManage.SearchTargets),
 		"embedding_top_k":   chatManage.EmbeddingTopK,
 		"vector_threshold":  chatManage.VectorThreshold,
 		"keyword_threshold": chatManage.KeywordThreshold,
@@ -92,10 +89,10 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 	allResults := make([]*types.SearchResult, 0)
 
 	wg.Add(2)
-	// Goroutine 1: Knowledge base search (rewrite + processed)
+	// Goroutine 1: Knowledge base search using SearchTargets
 	go func() {
 		defer wg.Done()
-		kbResults := p.searchKnowledgeBases(ctx, knowledgeBaseIDs, chatManage)
+		kbResults := p.searchByTargets(ctx, chatManage)
 		if len(kbResults) > 0 {
 			mu.Lock()
 			allResults = append(allResults, kbResults...)
@@ -141,11 +138,11 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 			})
 			expTopK := max(chatManage.EmbeddingTopK*2, chatManage.RerankTopK*2)
 			expKwTh := chatManage.KeywordThreshold * 0.8
-			// Concurrent expansion retrieval across queries and KBs
+			// Concurrent expansion retrieval across queries and search targets
 			expResults := make([]*types.SearchResult, 0, expTopK*len(expansions))
 			var muExp sync.Mutex
 			var wgExp sync.WaitGroup
-			jobs := len(expansions) * len(knowledgeBaseIDs)
+			jobs := len(expansions) * len(chatManage.SearchTargets)
 			capSem := 16
 			if jobs < capSem {
 				capSem = jobs
@@ -159,9 +156,9 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 				"cap":  capSem,
 			})
 			for _, q := range expansions {
-				for _, kbID := range knowledgeBaseIDs {
+				for _, target := range chatManage.SearchTargets {
 					wgExp.Add(1)
-					go func(q string, kbID string) {
+					go func(q string, t *types.SearchTarget) {
 						defer wgExp.Done()
 						sem <- struct{}{}
 						defer func() { <-sem }()
@@ -173,17 +170,21 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 							DisableVectorMatch:   true,
 							DisableKeywordsMatch: false,
 						}
-						res, err := p.knowledgeBaseService.HybridSearch(ctx, kbID, paramsExp)
+						// Apply knowledge ID filter if this is a partial KB search
+						if t.Type == types.SearchTargetTypeKnowledge {
+							paramsExp.KnowledgeIDs = t.KnowledgeIDs
+						}
+						res, err := p.knowledgeBaseService.HybridSearch(ctx, t.KnowledgeBaseID, paramsExp)
 						if err != nil {
 							pipelineWarn(ctx, "Search", "expansion_error", map[string]interface{}{
-								"kb_id": kbID,
+								"kb_id": t.KnowledgeBaseID,
 								"error": err.Error(),
 							})
 							return
 						}
 						if len(res) > 0 {
 							pipelineInfo(ctx, "Search", "expansion_hits", map[string]interface{}{
-								"kb_id": kbID,
+								"kb_id": t.KnowledgeBaseID,
 								"query": q,
 								"hits":  len(res),
 							})
@@ -191,7 +192,7 @@ func (p *PluginSearch) OnEvent(ctx context.Context,
 							expResults = append(expResults, res...)
 							muExp.Unlock()
 						}
-					}(q, kbID)
+					}(q, target)
 				}
 			}
 			wgExp.Wait()
@@ -308,46 +309,89 @@ func buildContentSignature(content string) string {
 	return searchutil.BuildContentSignature(content)
 }
 
-// searchKnowledgeBases performs KB searches across KB IDs using RewriteQuery only
-func (p *PluginSearch) searchKnowledgeBases(
+// searchByTargets performs KB searches using pre-computed SearchTargets
+// This is the main search method that uses the unified search targets
+func (p *PluginSearch) searchByTargets(
 	ctx context.Context,
-	knowledgeBaseIDs []string,
 	chatManage *types.ChatManage,
 ) []*types.SearchResult {
-	// Build params for rewrite query
-	baseParams := types.SearchParams{
-		QueryText:        strings.TrimSpace(chatManage.RewriteQuery),
-		VectorThreshold:  chatManage.VectorThreshold,
-		KeywordThreshold: chatManage.KeywordThreshold,
-		MatchCount:       chatManage.EmbeddingTopK,
+	if len(chatManage.SearchTargets) == 0 {
+		return nil
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var results []*types.SearchResult
 
-	// Search with rewrite query only (removed duplicate ProcessedQuery search)
-	for _, kbID := range knowledgeBaseIDs {
+	// Search each target concurrently
+	for _, target := range chatManage.SearchTargets {
 		wg.Add(1)
-		go func(knowledgeBaseID string) {
+		go func(t *types.SearchTarget) {
 			defer wg.Done()
-			res, err := p.knowledgeBaseService.HybridSearch(ctx, knowledgeBaseID, baseParams)
+
+			// List of knowledge IDs to perform vector search on
+			// Default to all IDs in the target
+			searchKnowledgeIDs := t.KnowledgeIDs
+
+			// Try direct loading for specific knowledge targets
+			if t.Type == types.SearchTargetTypeKnowledge {
+				directResults, skippedIDs := p.tryDirectChunkLoading(ctx, chatManage.TenantID, t.KnowledgeIDs)
+
+				if len(directResults) > 0 {
+					pipelineInfo(ctx, "Search", "direct_load", map[string]interface{}{
+						"kb_id":        t.KnowledgeBaseID,
+						"loaded_count": len(directResults),
+						"skipped_ids":  len(skippedIDs),
+					})
+					mu.Lock()
+					results = append(results, directResults...)
+					mu.Unlock()
+				}
+
+				// If all files were loaded directly, we don't need to search anything
+				if len(skippedIDs) == 0 && len(t.KnowledgeIDs) > 0 {
+					return
+				}
+
+				// Otherwise, only search the files that were skipped (too large)
+				searchKnowledgeIDs = skippedIDs
+			}
+
+			// If no IDs left to search (and we are in Knowledge mode), we are done
+			if t.Type == types.SearchTargetTypeKnowledge && len(searchKnowledgeIDs) == 0 {
+				return
+			}
+
+			// Build params for rewrite query
+			params := types.SearchParams{
+				QueryText:        strings.TrimSpace(chatManage.RewriteQuery),
+				VectorThreshold:  chatManage.VectorThreshold,
+				KeywordThreshold: chatManage.KeywordThreshold,
+				MatchCount:       chatManage.EmbeddingTopK,
+			}
+			// Apply knowledge ID filter if this is a partial KB search
+			if t.Type == types.SearchTargetTypeKnowledge {
+				params.KnowledgeIDs = searchKnowledgeIDs
+			}
+			res, err := p.knowledgeBaseService.HybridSearch(ctx, t.KnowledgeBaseID, params)
 			if err != nil {
 				pipelineWarn(ctx, "Search", "kb_search_error", map[string]interface{}{
-					"kb_id": knowledgeBaseID,
-					"query": baseParams.QueryText,
-					"error": err.Error(),
+					"kb_id":       t.KnowledgeBaseID,
+					"target_type": t.Type,
+					"query":       params.QueryText,
+					"error":       err.Error(),
 				})
 				return
 			}
 			pipelineInfo(ctx, "Search", "kb_result", map[string]interface{}{
-				"kb_id":     knowledgeBaseID,
-				"hit_count": len(res),
+				"kb_id":       t.KnowledgeBaseID,
+				"target_type": t.Type,
+				"hit_count":   len(res),
 			})
 			mu.Lock()
 			results = append(results, res...)
 			mu.Unlock()
-		}(kbID)
+		}(target)
 	}
 
 	wg.Wait()
@@ -358,9 +402,96 @@ func (p *PluginSearch) searchKnowledgeBases(
 	return results
 }
 
+// tryDirectChunkLoading attempts to load chunks for given knowledge IDs directly
+// Returns loaded results and a list of knowledge IDs that were skipped (e.g. due to size limits)
+func (p *PluginSearch) tryDirectChunkLoading(ctx context.Context, tenantID uint64, knowledgeIDs []string) ([]*types.SearchResult, []string) {
+	if len(knowledgeIDs) == 0 {
+		return nil, nil
+	}
+
+	// Limit direct loading to avoid OOM or context overflow
+	// 50 chunks * ~500 chars/chunk ~= 25k chars
+	const maxTotalChunks = 50
+
+	var allChunks []*types.Chunk
+	var skippedIDs []string
+	loadedKnowledgeIDs := make(map[string]bool)
+
+	for _, kid := range knowledgeIDs {
+		// Optimization: Check chunk count first if possible?
+		chunks, err := p.chunkService.ListChunksByKnowledgeID(ctx, kid)
+		if err != nil {
+			logger.Warnf(ctx, "DirectLoad: Failed to list chunks for knowledge %s: %v", kid, err)
+			skippedIDs = append(skippedIDs, kid)
+			continue
+		}
+
+		if len(allChunks)+len(chunks) > maxTotalChunks {
+			logger.Infof(ctx, "DirectLoad: Skipped knowledge %s due to size limit (%d + %d > %d)",
+				kid, len(allChunks), len(chunks), maxTotalChunks)
+			skippedIDs = append(skippedIDs, kid)
+			continue
+		}
+		allChunks = append(allChunks, chunks...)
+		loadedKnowledgeIDs[kid] = true
+	}
+
+	if len(allChunks) == 0 {
+		return nil, skippedIDs
+	}
+
+	// Fetch Knowledge metadata
+	var uniqueKIDs []string
+	for kid := range loadedKnowledgeIDs {
+		uniqueKIDs = append(uniqueKIDs, kid)
+	}
+
+	knowledgeMap := make(map[string]*types.Knowledge)
+	if len(uniqueKIDs) > 0 {
+		knowledges, err := p.knowledgeService.GetKnowledgeBatch(ctx, tenantID, uniqueKIDs)
+		if err != nil {
+			logger.Warnf(ctx, "DirectLoad: Failed to fetch knowledge batch: %v", err)
+			// Continue without metadata
+		} else {
+			for _, k := range knowledges {
+				knowledgeMap[k.ID] = k
+			}
+		}
+	}
+
+	var results []*types.SearchResult
+	for _, chunk := range allChunks {
+		res := &types.SearchResult{
+			ID:            chunk.ID,
+			Content:       chunk.Content,
+			Score:         1.0, // Maximum score for direct matches
+			KnowledgeID:   chunk.KnowledgeID,
+			ChunkIndex:    chunk.ChunkIndex,
+			MatchType:     types.MatchTypeDirectLoad,
+			ChunkType:     string(chunk.ChunkType),
+			ParentChunkID: chunk.ParentChunkID,
+			ImageInfo:     chunk.ImageInfo,
+			ChunkMetadata: chunk.Metadata,
+			StartAt:       chunk.StartAt,
+			EndAt:         chunk.EndAt,
+		}
+
+		if k, ok := knowledgeMap[chunk.KnowledgeID]; ok {
+			res.KnowledgeTitle = k.Title
+			res.KnowledgeFilename = k.FileName
+			res.KnowledgeSource = k.Source
+			res.Metadata = k.GetMetadata()
+		}
+
+		results = append(results, res)
+	}
+
+	return results, skippedIDs
+}
+
 // searchWebIfEnabled executes web search when enabled and returns converted results
 func (p *PluginSearch) searchWebIfEnabled(ctx context.Context, chatManage *types.ChatManage) []*types.SearchResult {
-	if !chatManage.WebSearchEnabled || p.webSearchService == nil || p.tenantService == nil || chatManage.TenantID <= 0 {
+	if !chatManage.WebSearchEnabled || p.webSearchService == nil || p.tenantService == nil {
 		return nil
 	}
 	tenant := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
@@ -385,8 +516,8 @@ func (p *PluginSearch) searchWebIfEnabled(ctx context.Context, chatManage *types
 	}
 	// Build questions using RewriteQuery only
 	questions := []string{strings.TrimSpace(chatManage.RewriteQuery)}
-	// Load session-scoped temp KB state from Redis using SessionService
-	tempKBID, seen, ids := p.sessionService.GetWebSearchTempKBState(ctx, chatManage.SessionID)
+	// Load session-scoped temp KB state from Redis using WebSearchStateRepository
+	tempKBID, seen, ids := p.webSearchStateService.GetWebSearchTempKBState(ctx, chatManage.SessionID)
 	compressed, kbID, newSeen, newIDs, err := p.webSearchService.CompressWithRAG(
 		ctx, chatManage.SessionID, tempKBID, questions, webResults, tenant.WebSearchConfig,
 		p.knowledgeBaseService, p.knowledgeService, seen, ids,
@@ -397,8 +528,8 @@ func (p *PluginSearch) searchWebIfEnabled(ctx context.Context, chatManage *types
 		})
 	} else {
 		webResults = compressed
-		// Persist temp KB state back into Redis using SessionService
-		p.sessionService.SaveWebSearchTempKBState(ctx, chatManage.SessionID, kbID, newSeen, newIDs)
+		// Persist temp KB state back into Redis using WebSearchStateRepository
+		p.webSearchStateService.SaveWebSearchTempKBState(ctx, chatManage.SessionID, kbID, newSeen, newIDs)
 	}
 	res := searchutil.ConvertWebSearchResults(webResults)
 	pipelineInfo(ctx, "Search", "web_hits", map[string]interface{}{

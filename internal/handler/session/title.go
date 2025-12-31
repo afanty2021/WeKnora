@@ -8,7 +8,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// GenerateTitle generates a title for a session based on message content
+// GenerateTitle godoc
+// @Summary      生成会话标题
+// @Description  根据消息内容自动生成会话标题
+// @Tags         会话
+// @Accept       json
+// @Produce      json
+// @Param        session_id  path      string                true  "会话ID"
+// @Param        request     body      GenerateTitleRequest  true  "生成请求"
+// @Success      200         {object}  map[string]interface{}  "生成的标题"
+// @Failure      400         {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /sessions/{session_id}/title [post]
 func (h *Handler) GenerateTitle(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -40,7 +52,7 @@ func (h *Handler) GenerateTitle(c *gin.Context) {
 
 	// Call service to generate title
 	logger.Infof(ctx, "Generating session title, session ID: %s, message count: %d", sessionID, len(request.Messages))
-	title, err := h.sessionService.GenerateTitle(ctx, session, request.Messages)
+	title, err := h.sessionService.GenerateTitle(ctx, session, request.Messages, "")
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, nil)
 		c.Error(errors.NewInternalServerError(err.Error()))

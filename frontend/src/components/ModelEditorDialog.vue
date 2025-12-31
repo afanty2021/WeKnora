@@ -25,15 +25,21 @@
           <t-radio-group v-model="formData.source">
             <t-radio
               value="local"
-              :disabled="ollamaServiceStatus === false"
+              :disabled="ollamaServiceStatus === false || modelType === 'rerank'"
             >
               {{ $t('model.editor.sourceLocal') }}
             </t-radio>
             <t-radio value="remote">{{ $t('model.editor.sourceRemote') }}</t-radio>
           </t-radio-group>
 
+          <!-- ReRank模型不支持Ollama的提示信息 -->
+          <div v-if="modelType === 'rerank'" class="ollama-unavailable-tip rerank-tip">
+            <t-icon name="info-circle-filled" class="tip-icon info" />
+            <span class="tip-text">{{ $t('model.editor.ollamaNotSupportRerank') }}</span>
+          </div>
+
           <!-- Ollama不可用时的提示信息 -->
-          <div v-if="ollamaServiceStatus === false" class="ollama-unavailable-tip">
+          <div v-else-if="ollamaServiceStatus === false" class="ollama-unavailable-tip">
             <t-icon name="error-circle-filled" class="tip-icon" />
             <span class="tip-text">{{ $t('model.editor.ollamaUnavailable') }}</span>
             <t-button
@@ -113,17 +119,39 @@
           </div>
         </div>
 
-        <!-- Remote API 和 VLLM 保持原有的 input -->
-        <div v-else class="form-item">
-          <label class="form-label required">{{ $t('model.modelName') }}</label>
-          <t-input 
-            v-model="formData.modelName" 
-            :placeholder="getModelNamePlaceholder()"
-          />
-        </div>
-
         <!-- Remote API 配置 -->
         <template v-if="formData.source === 'remote'">
+          <!-- 厂商选择器 -->
+          <div class="form-item">
+            <label class="form-label">{{ $t('model.editor.providerLabel') }}</label>
+            <t-select 
+              v-model="formData.provider" 
+              :placeholder="$t('model.editor.providerPlaceholder')"
+              @change="handleProviderChange"
+            >
+              <t-option 
+                v-for="opt in providerOptions" 
+                :key="opt.value" 
+                :value="opt.value" 
+                :label="opt.label"
+              >
+                <div class="provider-option">
+                  <span class="provider-name">{{ opt.label }}</span>
+                  <span class="provider-desc">{{ opt.description }}</span>
+                </div>
+              </t-option>
+            </t-select>
+          </div>
+
+          <!-- 模型名称 -->
+          <div class="form-item">
+            <label class="form-label required">{{ $t('model.modelName') }}</label>
+            <t-input 
+              v-model="formData.modelName" 
+              :placeholder="getModelNamePlaceholder()"
+            />
+          </div>
+
           <div class="form-item">
             <label class="form-label required">{{ $t('model.editor.baseUrlLabel') }}</label>
             <t-input 
@@ -223,7 +251,7 @@
 <script setup lang="ts">
 import { ref, watch, computed, onUnmounted, nextTick } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { checkOllamaModels, checkRemoteModel, testEmbeddingModel, checkRerankModel, listOllamaModels, downloadOllamaModel, getDownloadProgress, checkOllamaStatus, type OllamaModelInfo } from '@/api/initialization'
+import { checkOllamaModels, checkRemoteModel, testEmbeddingModel, checkRerankModel, listOllamaModels, downloadOllamaModel, getDownloadProgress, checkOllamaStatus, listModelProviders, type OllamaModelInfo, type ModelProviderOption } from '@/api/initialization'
 import { useI18n } from 'vue-i18n'
 import { useUIStore } from '@/stores/ui'
 
@@ -231,6 +259,7 @@ interface ModelFormData {
   id: string
   name: string
   source: 'local' | 'remote'
+  provider?: string // Provider identifier: openai, aliyun, zhipu, generic, etc.
   modelName: string
   baseUrl?: string
   apiKey?: string
@@ -257,6 +286,111 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
   'confirm': [data: ModelFormData]
 }>()
+
+// API 返回的 Provider 列表
+const apiProviderOptions = ref<ModelProviderOption[]>([])
+const loadingProviders = ref(false)
+
+// 硬编码的后备 Provider 配置 (当 API 不可用时使用)
+const fallbackProviderOptions = computed(() => [
+  { 
+    value: 'openai', 
+    label: t('model.editor.providers.openai.label'), 
+    defaultUrls: {
+      chat: 'https://api.openai.com/v1',
+      embedding: 'https://api.openai.com/v1',
+      rerank: 'https://api.openai.com/v1',
+      vllm: 'https://api.openai.com/v1'
+    },
+    description: t('model.editor.providers.openai.description'),
+    modelTypes: ['chat', 'embedding', 'vllm']
+  },
+  { 
+    value: 'aliyun', 
+    label: t('model.editor.providers.aliyun.label'), 
+    defaultUrls: {
+      chat: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      embedding: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      rerank: 'https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank',
+      vllm: 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    },
+    description: t('model.editor.providers.aliyun.description'),
+    modelTypes: ['chat', 'embedding', 'rerank', 'vllm']
+  },
+  { 
+    value: 'zhipu', 
+    label: t('model.editor.providers.zhipu.label'), 
+    defaultUrls: {
+      chat: 'https://open.bigmodel.cn/api/paas/v4',
+      embedding: 'https://open.bigmodel.cn/api/paas/v4/embeddings',
+      vllm: 'https://open.bigmodel.cn/api/paas/v4'
+    },
+    description: t('model.editor.providers.zhipu.description'),
+    modelTypes: ['chat', 'embedding', 'vllm']
+  },
+  { 
+    value: 'openrouter', 
+    label: t('model.editor.providers.openrouter.label'), 
+    defaultUrls: { chat: 'https://openrouter.ai/api/v1' },
+    description: t('model.editor.providers.openrouter.description'),
+    modelTypes: ['chat']
+  },
+  { 
+    value: 'siliconflow', 
+    label: t('model.editor.providers.siliconflow.label'), 
+    defaultUrls: {
+      chat: 'https://api.siliconflow.cn/v1',
+      embedding: 'https://api.siliconflow.cn/v1',
+      rerank: 'https://api.siliconflow.cn/v1'
+    },
+    description: t('model.editor.providers.siliconflow.description'),
+    modelTypes: ['chat', 'embedding', 'rerank']
+  },
+  { 
+    value: 'jina', 
+    label: t('model.editor.providers.jina.label'), 
+    defaultUrls: {
+      embedding: 'https://api.jina.ai/v1',
+      rerank: 'https://api.jina.ai/v1'
+    },
+    description: t('model.editor.providers.jina.description'),
+    modelTypes: ['embedding', 'rerank']
+  },
+  { 
+    value: 'generic', 
+    label: t('model.editor.providers.generic.label'), 
+    defaultUrls: {},
+    description: t('model.editor.providers.generic.description'),
+    modelTypes: ['chat', 'embedding', 'rerank', 'vllm']
+  },
+])
+
+// 从 API 获取 Provider 列表
+const loadProviders = async () => {
+  loadingProviders.value = true
+  try {
+    const providers = await listModelProviders(props.modelType)
+    if (providers.length > 0) {
+      apiProviderOptions.value = providers
+    }
+  } catch (error) {
+    console.error('Failed to load providers from API, using fallback', error)
+  } finally {
+    loadingProviders.value = false
+  }
+}
+
+// 根据当前模型类型过滤的 Provider 列表
+const providerOptions = computed(() => {
+  // 优先使用 API 返回的数据
+  if (apiProviderOptions.value.length > 0) {
+    return apiProviderOptions.value
+  }
+  // 回退到硬编码值，按 modelTypes 过滤
+  return fallbackProviderOptions.value.filter(p => 
+    p.modelTypes.includes(props.modelType)
+  )
+})
 
 const dialogVisible = computed({
   get: () => props.visible,
@@ -294,6 +428,7 @@ const formData = ref<ModelFormData>({
   id: '',
   name: '',
   source: 'local',
+  provider: 'openai',
   modelName: '',
   baseUrl: '',
   apiKey: '',
@@ -410,10 +545,18 @@ watch(() => props.visible, (val) => {
     // 检查Ollama服务状态
     checkOllamaServiceStatus()
 
+    // 从 API 加载 Model Provider 列表
+    loadProviders()
+
     if (props.modelData) {
       formData.value = { ...props.modelData }
     } else {
       resetForm()
+    }
+
+    // ReRank 模型强制使用 remote 来源（Ollama 不支持 ReRank）
+    if (props.modelType === 'rerank') {
+      formData.value.source = 'remote'
     }
   } else {
     // 恢复背景滚动
@@ -427,6 +570,7 @@ const resetForm = () => {
     id: generateId(),
     name: '', // 保留字段但不使用，保存时用 modelName
     source: 'local',
+    provider: 'generic',
     modelName: '',
     baseUrl: '',
     apiKey: '',
@@ -442,6 +586,22 @@ const resetForm = () => {
   dimensionChecked.value = false
   dimensionSuccess.value = false
   dimensionMessage.value = ''
+}
+
+// 处理厂商选择变化 (自动填充默认 URL)
+const handleProviderChange = (value: string) => {
+  const provider = providerOptions.value.find(opt => opt.value === value)
+  if (provider && provider.defaultUrls) {
+    // 根据当前模型类型获取对应的默认 URL
+    const defaultUrl = provider.defaultUrls[props.modelType]
+    if (defaultUrl) {
+      formData.value.baseUrl = defaultUrl
+    }
+    // 重置校验状态
+    remoteChecked.value = false
+    remoteAvailable.value = false
+    remoteMessage.value = ''
+  }
 }
 
 // 监听来源变化，重置校验状态（已合并到下面的 watch）
@@ -602,7 +762,8 @@ const checkRemoteAPI = async () => {
           modelName: formData.value.modelName,
           baseUrl: formData.value.baseUrl,
           apiKey: formData.value.apiKey || '',
-          dimension: formData.value.dimension
+          dimension: formData.value.dimension,
+          provider: formData.value.provider
         })
         // 如果测试成功且返回了维度，自动填充
         if (result.available && result.dimension) {
@@ -1002,6 +1163,25 @@ const handleCancel = () => {
   }
 }
 
+// 厂商选择器样式
+.provider-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+
+  .provider-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #333333;
+  }
+
+  .provider-desc {
+    font-size: 12px;
+    color: #999999;
+  }
+}
+
 // 单选按钮组
 :deep(.t-radio-group) {
   display: flex;
@@ -1314,12 +1494,27 @@ const handleCancel = () => {
     font-size: 16px;
     flex-shrink: 0;
     margin-right: 2px;
+
+    &.info {
+      color: #07C05F;
+    }
   }
 
   .tip-text {
     color: #dc2626;
     flex: 1;
     line-height: 1.5;
+  }
+
+  // ReRank提示使用主题绿色风格，与主页面保持一致
+  &.rerank-tip {
+    background: #f0fdf6;
+    border: 1px solid #d1fae5;
+    border-left: 3px solid #07C05F;
+
+    .tip-text {
+      color: #166534;
+    }
   }
 
   :deep(.tip-link) {

@@ -40,11 +40,17 @@ func NewTenantHandler(service interfaces.TenantService, userService interfaces.U
 	}
 }
 
-// CreateTenant handles the HTTP request for creating a new tenant
-// It deserializes the request body into a tenant object, validates it,
-// calls the service to create the tenant, and returns the result
-// Parameters:
-//   - c: Gin context for the HTTP request
+// CreateTenant godoc
+// @Summary      创建租户
+// @Description  创建新的租户
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        request  body      types.Tenant  true  "租户信息"
+// @Success      201      {object}  map[string]interface{}  "创建的租户"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Router       /tenants [post]
 func (h *TenantHandler) CreateTenant(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -85,11 +91,19 @@ func (h *TenantHandler) CreateTenant(c *gin.Context) {
 	})
 }
 
-// GetTenant handles the HTTP request for retrieving a tenant by ID
-// It extracts and validates the tenant ID from the URL parameter,
-// retrieves the tenant from the service, and returns it in the response
-// Parameters:
-//   - c: Gin context for the HTTP request
+// GetTenant godoc
+// @Summary      获取租户详情
+// @Description  根据ID获取租户详情
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        id   path      int  true  "租户ID"
+// @Success      200  {object}  map[string]interface{}  "租户详情"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Failure      404  {object}  errors.AppError         "租户不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/{id} [get]
 func (h *TenantHandler) GetTenant(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -119,11 +133,18 @@ func (h *TenantHandler) GetTenant(c *gin.Context) {
 	})
 }
 
-// UpdateTenant handles the HTTP request for updating an existing tenant
-// It extracts the tenant ID from the URL parameter, deserializes the request body,
-// validates the data, updates the tenant through the service, and returns the result
-// Parameters:
-//   - c: Gin context for the HTTP request
+// UpdateTenant godoc
+// @Summary      更新租户
+// @Description  更新租户信息
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        id       path      int           true  "租户ID"
+// @Param        request  body      types.Tenant  true  "租户信息"
+// @Success      200      {object}  map[string]interface{}  "更新后的租户"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Router       /tenants/{id} [put]
 func (h *TenantHandler) UpdateTenant(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -171,11 +192,17 @@ func (h *TenantHandler) UpdateTenant(c *gin.Context) {
 	})
 }
 
-// DeleteTenant handles the HTTP request for deleting a tenant
-// It extracts and validates the tenant ID from the URL parameter,
-// calls the service to delete the tenant, and returns the result
-// Parameters:
-//   - c: Gin context for the HTTP request
+// DeleteTenant godoc
+// @Summary      删除租户
+// @Description  删除指定的租户
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        id   path      int  true  "租户ID"
+// @Success      200  {object}  map[string]interface{}  "删除成功"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Router       /tenants/{id} [delete]
 func (h *TenantHandler) DeleteTenant(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -209,10 +236,16 @@ func (h *TenantHandler) DeleteTenant(c *gin.Context) {
 	})
 }
 
-// ListTenants handles the HTTP request for retrieving a list of all tenants
-// It calls the service to fetch the tenant list and returns it in the response
-// Parameters:
-//   - c: Gin context for the HTTP request
+// ListTenants godoc
+// @Summary      获取租户列表
+// @Description  获取当前用户可访问的租户列表
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "租户列表"
+// @Failure      500  {object}  errors.AppError         "服务器错误"
+// @Security     Bearer
+// @Router       /tenants [get]
 func (h *TenantHandler) ListTenants(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -237,10 +270,16 @@ func (h *TenantHandler) ListTenants(c *gin.Context) {
 	})
 }
 
-// ListAllTenants handles the HTTP request for retrieving a list of all tenants
-// This endpoint requires cross-tenant access permission
-// Parameters:
-//   - c: Gin context for the HTTP request
+// ListAllTenants godoc
+// @Summary      获取所有租户列表
+// @Description  获取系统中所有租户（需要跨租户访问权限）
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "所有租户列表"
+// @Failure      403  {object}  errors.AppError         "权限不足"
+// @Security     Bearer
+// @Router       /tenants/all [get]
 func (h *TenantHandler) ListAllTenants(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -287,13 +326,21 @@ func (h *TenantHandler) ListAllTenants(c *gin.Context) {
 	})
 }
 
-// SearchTenants handles the HTTP request for searching tenants with pagination
-// This endpoint requires cross-tenant access permission
-// Query parameters:
-//   - keyword: search keyword (optional)
-//   - tenant_id: filter by tenant ID (optional)
-//   - page: page number (default: 1)
-//   - page_size: page size (default: 20)
+// SearchTenants godoc
+// @Summary      搜索租户
+// @Description  分页搜索租户（需要跨租户访问权限）
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        keyword    query     string  false  "搜索关键词"
+// @Param        tenant_id  query     int     false  "租户ID筛选"
+// @Param        page       query     int     false  "页码"  default(1)
+// @Param        page_size  query     int     false  "每页数量"  default(20)
+// @Success      200        {object}  map[string]interface{}  "搜索结果"
+// @Failure      403        {object}  errors.AppError         "权限不足"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/search [get]
 func (h *TenantHandler) SearchTenants(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -372,17 +419,24 @@ func (h *TenantHandler) SearchTenants(c *gin.Context) {
 
 // AgentConfigRequest represents the request body for updating agent configuration
 type AgentConfigRequest struct {
-	MaxIterations           int      `json:"max_iterations"`
-	ReflectionEnabled       bool     `json:"reflection_enabled"`
-	AllowedTools            []string `json:"allowed_tools"`
-	Temperature             float64  `json:"temperature"`
-	SystemPromptWebEnabled  string   `json:"system_prompt_web_enabled,omitempty"`
-	SystemPromptWebDisabled string   `json:"system_prompt_web_disabled,omitempty"`
-	UseCustomPrompt         *bool    `json:"use_custom_system_prompt"`
+	MaxIterations     int      `json:"max_iterations"`
+	ReflectionEnabled bool     `json:"reflection_enabled"`
+	AllowedTools      []string `json:"allowed_tools"`
+	Temperature       float64  `json:"temperature"`
+	SystemPrompt      string   `json:"system_prompt,omitempty"` // Unified system prompt (uses {{web_search_status}} placeholder)
 }
 
-// GetTenantAgentConfig retrieves the agent configuration for a tenant
-// This is the global agent configuration that applies to all sessions by default
+// GetTenantAgentConfig godoc
+// @Summary      获取租户Agent配置
+// @Description  获取租户的全局Agent配置（默认应用于所有会话）
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "Agent配置"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/kv/agent-config [get]
 func (h *TenantHandler) GetTenantAgentConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenant := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
@@ -417,45 +471,37 @@ func (h *TenantHandler) GetTenantAgentConfig(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"data": gin.H{
-				"max_iterations":             agent.DefaultAgentMaxIterations,
-				"reflection_enabled":         agent.DefaultAgentReflectionEnabled,
-				"allowed_tools":              agenttools.DefaultAllowedTools(),
-				"temperature":                agent.DefaultAgentTemperature,
-				"system_prompt_web_enabled":  agent.ProgressiveRAGSystemPromptWithWeb,
-				"system_prompt_web_disabled": agent.ProgressiveRAGSystemPromptWithoutWeb,
-				"use_custom_system_prompt":   false,
-				"available_tools":            availableTools,
-				"available_placeholders":     availablePlaceholders,
+				"max_iterations":           agent.DefaultAgentMaxIterations,
+				"reflection_enabled":       agent.DefaultAgentReflectionEnabled,
+				"allowed_tools":            agenttools.DefaultAllowedTools(),
+				"temperature":              agent.DefaultAgentTemperature,
+				"system_prompt":            agent.ProgressiveRAGSystemPrompt,
+				"use_custom_system_prompt": false,
+				"available_tools":          availableTools,
+				"available_placeholders":   availablePlaceholders,
 			},
 		})
 		return
 	}
 
-	// Get system prompts for both web search states, use defaults if empty
-	systemPromptWithWeb := tenant.AgentConfig.ResolveSystemPrompt(true)
-	if systemPromptWithWeb == "" {
-		systemPromptWithWeb = agent.ProgressiveRAGSystemPromptWithWeb
+	// Get system prompt, use default if empty
+	systemPrompt := tenant.AgentConfig.ResolveSystemPrompt(true) // webSearchEnabled doesn't matter for unified prompt
+	if systemPrompt == "" {
+		systemPrompt = agent.ProgressiveRAGSystemPrompt
 	}
-	systemPromptWithoutWeb := tenant.AgentConfig.ResolveSystemPrompt(false)
-	if systemPromptWithoutWeb == "" {
-		systemPromptWithoutWeb = agent.ProgressiveRAGSystemPromptWithoutWeb
-	}
-
-	useCustomPrompt := tenant.AgentConfig.UseCustomSystemPrompt
 
 	logger.Infof(ctx, "Retrieved tenant agent config successfully, Tenant ID: %d", tenant.ID)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"max_iterations":             tenant.AgentConfig.MaxIterations,
-			"reflection_enabled":         tenant.AgentConfig.ReflectionEnabled,
-			"allowed_tools":              agenttools.DefaultAllowedTools(),
-			"temperature":                tenant.AgentConfig.Temperature,
-			"system_prompt_web_enabled":  systemPromptWithWeb,
-			"system_prompt_web_disabled": systemPromptWithoutWeb,
-			"use_custom_system_prompt":   useCustomPrompt,
-			"available_tools":            availableTools,
-			"available_placeholders":     availablePlaceholders,
+			"max_iterations":           tenant.AgentConfig.MaxIterations,
+			"reflection_enabled":       tenant.AgentConfig.ReflectionEnabled,
+			"allowed_tools":            agenttools.DefaultAllowedTools(),
+			"temperature":              tenant.AgentConfig.Temperature,
+			"system_prompt":            systemPrompt,
+			"use_custom_system_prompt": tenant.AgentConfig.UseCustomSystemPrompt,
+			"available_tools":          availableTools,
+			"available_placeholders":   availablePlaceholders,
 		},
 	})
 }
@@ -490,25 +536,21 @@ func (h *TenantHandler) updateTenantAgentConfigInternal(c *gin.Context) {
 		return
 	}
 	// Update agent configuration
-	useCustomPrompt := false
-	if tenant.AgentConfig != nil {
-		useCustomPrompt = tenant.AgentConfig.UseCustomSystemPrompt
-	}
-	if req.UseCustomPrompt != nil {
-		useCustomPrompt = *req.UseCustomPrompt
+	// Determine if using custom prompt based on whether custom prompts are set
+	// Support both new unified SystemPrompt and deprecated separate prompts
+	systemPrompt := req.SystemPrompt
+	useCustomPrompt := systemPrompt != ""
+
+	agentConfig := &types.AgentConfig{
+		MaxIterations:         req.MaxIterations,
+		ReflectionEnabled:     req.ReflectionEnabled,
+		AllowedTools:          agenttools.DefaultAllowedTools(),
+		Temperature:           req.Temperature,
+		SystemPrompt:          systemPrompt,
+		UseCustomSystemPrompt: useCustomPrompt,
 	}
 
-	tenant.AgentConfig = &types.AgentConfig{
-		MaxIterations:           req.MaxIterations,
-		ReflectionEnabled:       req.ReflectionEnabled,
-		AllowedTools:            agenttools.DefaultAllowedTools(),
-		Temperature:             req.Temperature,
-		SystemPromptWebEnabled:  req.SystemPromptWebEnabled,
-		SystemPromptWebDisabled: req.SystemPromptWebDisabled,
-		UseCustomSystemPrompt:   useCustomPrompt,
-	}
-
-	updatedTenant, err := h.service.UpdateTenant(ctx, tenant)
+	_, err := h.service.UpdateTenant(ctx, tenant)
 	if err != nil {
 		if appErr, ok := errors.IsAppError(err); ok {
 			logger.Error(ctx, "Failed to update tenant: application error", appErr)
@@ -523,15 +565,23 @@ func (h *TenantHandler) updateTenantAgentConfigInternal(c *gin.Context) {
 	logger.Infof(ctx, "Tenant agent config updated successfully, Tenant ID: %d", tenant.ID)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    updatedTenant.AgentConfig,
+		"data":    agentConfig,
 		"message": "Agent configuration updated successfully",
 	})
 }
 
-// GetTenantKV provides a generic KV-style getter for tenant-level configurations
-// Supported keys:
-// - "agent-config": returns tenant.AgentConfig with additional available_* fields
-// - "web-search-config": returns masked tenant.WebSearchConfig (API key masked)
+// GetTenantKV godoc
+// @Summary      获取租户KV配置
+// @Description  获取租户级别的KV配置（支持agent-config、web-search-config、conversation-config）
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        key  path      string  true  "配置键名"
+// @Success      200  {object}  map[string]interface{}  "配置值"
+// @Failure      400  {object}  errors.AppError         "不支持的键"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/kv/{key} [get]
 func (h *TenantHandler) GetTenantKV(c *gin.Context) {
 	ctx := c.Request.Context()
 	key := secutils.SanitizeForLog(c.Param("key"))
@@ -546,6 +596,9 @@ func (h *TenantHandler) GetTenantKV(c *gin.Context) {
 	case "conversation-config":
 		h.GetTenantConversationConfig(c)
 		return
+	case "prompt-templates":
+		h.GetPromptTemplates(c)
+		return
 	default:
 		logger.Info(ctx, "KV key not supported", "key", key)
 		c.Error(errors.NewBadRequestError("unsupported key"))
@@ -553,8 +606,19 @@ func (h *TenantHandler) GetTenantKV(c *gin.Context) {
 	}
 }
 
-// UpdateTenantKV provides a generic KV-style updater for tenant-level configurations
-// Body is the JSON value to set for the key.
+// UpdateTenantKV godoc
+// @Summary      更新租户KV配置
+// @Description  更新租户级别的KV配置（支持agent-config、web-search-config、conversation-config）
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Param        key      path      string  true  "配置键名"
+// @Param        request  body      object  true  "配置值"
+// @Success      200      {object}  map[string]interface{}  "更新成功"
+// @Failure      400      {object}  errors.AppError         "不支持的键"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/kv/{key} [put]
 func (h *TenantHandler) UpdateTenantKV(c *gin.Context) {
 	ctx := c.Request.Context()
 	key := secutils.SanitizeForLog(c.Param("key"))
@@ -620,7 +684,17 @@ func (h *TenantHandler) updateTenantWebSearchConfigInternal(c *gin.Context) {
 	})
 }
 
-// GetTenantWebSearchConfig returns the web search configuration for a tenant
+// GetTenantWebSearchConfig godoc
+// @Summary      获取租户网络搜索配置
+// @Description  获取租户的网络搜索配置
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "网络搜索配置"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/kv/web-search-config [get]
 func (h *TenantHandler) GetTenantWebSearchConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 	logger.Info(ctx, "Start getting tenant web search config")
@@ -641,25 +715,23 @@ func (h *TenantHandler) GetTenantWebSearchConfig(c *gin.Context) {
 
 func (h *TenantHandler) buildDefaultConversationConfig() *types.ConversationConfig {
 	return &types.ConversationConfig{
-		Prompt:                   h.config.Conversation.Summary.Prompt,
-		ContextTemplate:          h.config.Conversation.Summary.ContextTemplate,
-		UseCustomContextTemplate: true,
-		UseCustomSystemPrompt:    true,
-		Temperature:              h.config.Conversation.Summary.Temperature,
-		MaxCompletionTokens:      h.config.Conversation.Summary.MaxCompletionTokens,
-		MaxRounds:                h.config.Conversation.MaxRounds,
-		EmbeddingTopK:            h.config.Conversation.EmbeddingTopK,
-		KeywordThreshold:         h.config.Conversation.KeywordThreshold,
-		VectorThreshold:          h.config.Conversation.VectorThreshold,
-		RerankTopK:               h.config.Conversation.RerankTopK,
-		RerankThreshold:          h.config.Conversation.RerankThreshold,
-		EnableRewrite:            h.config.Conversation.EnableRewrite,
-		EnableQueryExpansion:     h.config.Conversation.EnableQueryExpansion,
-		FallbackStrategy:         h.config.Conversation.FallbackStrategy,
-		FallbackResponse:         h.config.Conversation.FallbackResponse,
-		FallbackPrompt:           h.config.Conversation.FallbackPrompt,
-		RewritePromptUser:        h.config.Conversation.RewritePromptUser,
-		RewritePromptSystem:      h.config.Conversation.RewritePromptSystem,
+		Prompt:               h.config.Conversation.Summary.Prompt,
+		ContextTemplate:      h.config.Conversation.Summary.ContextTemplate,
+		Temperature:          h.config.Conversation.Summary.Temperature,
+		MaxCompletionTokens:  h.config.Conversation.Summary.MaxCompletionTokens,
+		MaxRounds:            h.config.Conversation.MaxRounds,
+		EmbeddingTopK:        h.config.Conversation.EmbeddingTopK,
+		KeywordThreshold:     h.config.Conversation.KeywordThreshold,
+		VectorThreshold:      h.config.Conversation.VectorThreshold,
+		RerankTopK:           h.config.Conversation.RerankTopK,
+		RerankThreshold:      h.config.Conversation.RerankThreshold,
+		EnableRewrite:        h.config.Conversation.EnableRewrite,
+		EnableQueryExpansion: h.config.Conversation.EnableQueryExpansion,
+		FallbackStrategy:     h.config.Conversation.FallbackStrategy,
+		FallbackResponse:     h.config.Conversation.FallbackResponse,
+		FallbackPrompt:       h.config.Conversation.FallbackPrompt,
+		RewritePromptUser:    h.config.Conversation.RewritePromptUser,
+		RewritePromptSystem:  h.config.Conversation.RewritePromptSystem,
 	}
 }
 
@@ -696,8 +768,17 @@ func validateConversationConfig(req *types.ConversationConfig) error {
 	return nil
 }
 
-// GetTenantConversationConfig retrieves the conversation configuration for a tenant
-// This is the global conversation configuration that applies to normal mode sessions by default
+// GetTenantConversationConfig godoc
+// @Summary      获取租户对话配置
+// @Description  获取租户的全局对话配置（默认应用于普通模式会话）
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "对话配置"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/kv/conversation-config [get]
 func (h *TenantHandler) GetTenantConversationConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenant := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
@@ -709,91 +790,8 @@ func (h *TenantHandler) GetTenantConversationConfig(c *gin.Context) {
 
 	// If tenant has no conversation config, return defaults from config.yaml
 	var response *types.ConversationConfig
-	if tc := tenant.ConversationConfig; tc == nil {
-		logger.Info(ctx, "Tenant has no conversation config, returning defaults")
-		response = h.buildDefaultConversationConfig()
-	} else {
-		logger.Infof(ctx, "Tenant has conversation config, merging with defaults, Tenant ID: %d", tenant.ID)
-		// Merge tenant config with defaults, so that newly added fields always have valid values
-		defaultCfg := h.buildDefaultConversationConfig()
-		// Prompt related
-		defaultCfg.UseCustomSystemPrompt = tc.UseCustomSystemPrompt
-		if !defaultCfg.UseCustomSystemPrompt && tc.Prompt != "" {
-			// Legacy configs without explicit flag
-			defaultCfg.UseCustomSystemPrompt = true
-		}
-		defaultCfg.UseCustomContextTemplate = tc.UseCustomContextTemplate
-		if !defaultCfg.UseCustomContextTemplate && tc.ContextTemplate != "" {
-			defaultCfg.UseCustomContextTemplate = true
-		}
-		if tc.Prompt != "" {
-			defaultCfg.Prompt = tc.Prompt
-		}
-		if tc.ContextTemplate != "" {
-			defaultCfg.ContextTemplate = tc.ContextTemplate
-		}
-		if tc.Temperature > 0 {
-			defaultCfg.Temperature = tc.Temperature
-		}
-		if tc.MaxCompletionTokens > 0 {
-			defaultCfg.MaxCompletionTokens = tc.MaxCompletionTokens
-		}
-
-		// Retrieval parameters
-		if tc.MaxRounds > 0 {
-			defaultCfg.MaxRounds = tc.MaxRounds
-		}
-		if tc.EmbeddingTopK > 0 {
-			defaultCfg.EmbeddingTopK = tc.EmbeddingTopK
-		}
-		if tc.KeywordThreshold > 0 {
-			defaultCfg.KeywordThreshold = tc.KeywordThreshold
-		}
-		if tc.VectorThreshold > 0 {
-			defaultCfg.VectorThreshold = tc.VectorThreshold
-		}
-		if tc.RerankTopK > 0 {
-			defaultCfg.RerankTopK = tc.RerankTopK
-		}
-		if tc.RerankThreshold > 0 {
-			defaultCfg.RerankThreshold = tc.RerankThreshold
-		}
-		// EnableRewrite 需要允许显式关闭，因此直接覆盖
-		defaultCfg.EnableRewrite = tc.EnableRewrite
-
-		// Query expansion toggle
-		defaultCfg.EnableQueryExpansion = tc.EnableQueryExpansion
-
-		// Model IDs
-		if tc.SummaryModelID != "" {
-			defaultCfg.SummaryModelID = tc.SummaryModelID
-		}
-		if tc.RerankModelID != "" {
-			defaultCfg.RerankModelID = tc.RerankModelID
-		}
-
-		// Fallback settings
-		if tc.FallbackStrategy != "" {
-			defaultCfg.FallbackStrategy = tc.FallbackStrategy
-		}
-		if tc.FallbackResponse != "" {
-			defaultCfg.FallbackResponse = tc.FallbackResponse
-		}
-		if tc.FallbackPrompt != "" {
-			defaultCfg.FallbackPrompt = tc.FallbackPrompt
-		}
-
-		// Rewrite prompts
-		if tc.RewritePromptSystem != "" {
-			defaultCfg.RewritePromptSystem = tc.RewritePromptSystem
-		}
-		if tc.RewritePromptUser != "" {
-			defaultCfg.RewritePromptUser = tc.RewritePromptUser
-		}
-
-		response = defaultCfg
-	}
-
+	logger.Info(ctx, "Tenant has no conversation config, returning defaults")
+	response = h.buildDefaultConversationConfig()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    response,
@@ -847,5 +845,29 @@ func (h *TenantHandler) updateTenantConversationInternal(c *gin.Context) {
 		"success": true,
 		"data":    updatedTenant.ConversationConfig,
 		"message": "Conversation configuration updated successfully",
+	})
+}
+
+// GetPromptTemplates godoc
+// @Summary      获取提示词模板
+// @Description  获取系统配置的提示词模板列表
+// @Tags         租户管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "提示词模板配置"
+// @Failure      400  {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /tenants/kv/prompt-templates [get]
+func (h *TenantHandler) GetPromptTemplates(c *gin.Context) {
+	// Return prompt templates from config.yaml
+	templates := h.config.PromptTemplates
+	if templates == nil {
+		templates = &config.PromptTemplatesConfig{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    templates,
 	})
 }

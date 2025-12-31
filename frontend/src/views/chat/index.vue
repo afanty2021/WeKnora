@@ -4,7 +4,7 @@
             <div class="msg_list">
                 <div v-for="(session, id) in messagesList" :key='id'>
                     <div v-if="session.role == 'user'">
-                        <usermsg :content="session.content"></usermsg>
+                        <usermsg :content="session.content" :mentioned_items="session.mentioned_items"></usermsg>
                     </div>
                     <div v-if="session.role == 'assistant'">
                         <botmsg :content="session.content" :session="session" :user-query="getUserQuery(id)" @scroll-bottom="scrollToBottom"
@@ -23,7 +23,7 @@
         </div>
         <div style="min-height: 115px; margin: 16px auto 4px;width: 100%;max-width: 800px;">
             <InputField 
-                @send-msg="(query, modelId) => sendMsg(query, modelId)" 
+                @send-msg="(query, modelId, mentionedItems) => sendMsg(query, modelId, mentionedItems)" 
                 @stop-generation="handleStopGeneration"
                 :isReplying="isReplying" 
                 :sessionId="session_id"
@@ -61,7 +61,7 @@ const useSettingsStoreInstance = useSettingsStore();
 const uiStore = useUIStore();
 const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
 const { t } = useI18n();
-const { menuArr, isFirstSession, firstQuery } = storeToRefs(usemenuStore);
+const { menuArr, isFirstSession, firstQuery, firstMentionedItems } = storeToRefs(usemenuStore);
 const { output, onChunk, isStreaming, isLoading, error, startStream, stopStream } = useStream();
 const route = useRoute();
 const router = useRouter();
@@ -296,11 +296,12 @@ const handleStopGeneration = () => {
     // API 调用成功后，后端的 stop 事件会清空它
 };
 
-const sendMsg = async (value, modelId = '') => {
+const sendMsg = async (value, modelId = '', mentionedItems = []) => {
     userquery.value = value;
     isReplying.value = true;
     loading.value = true;
-    messagesList.push({ content: value, role: 'user' });
+    // 将@提及的知识库和文件信息存入用户消息
+    messagesList.push({ content: value, role: 'user', mentioned_items: mentionedItems });
     scrollToBottom();
     
     // Get agent mode status from settings store
@@ -311,18 +312,11 @@ const sendMsg = async (value, modelId = '') => {
     
     // Get knowledge_base_ids from settings store (selected by user via KnowledgeBaseSelector)
     const kbIds = useSettingsStoreInstance.settings.selectedKnowledgeBases || [];
+    const knowledgeIds = useSettingsStoreInstance.settings.selectedFiles || [];
     
-    // Validate knowledge_base_ids before sending (only when agent mode is enabled)
-    if (agentEnabled && kbIds.length === 0) {
-        MessagePlugin.warning(t('chat.selectKnowledgeBaseWarning'));
-        isReplying.value = false;
-        loading.value = false;
-        // 清空当前 assistant message ID
-        currentAssistantMessageId.value = '';
-        // Remove the user message that was just added
-        messagesList.pop();
-        return;
-    }
+    // Get selected agent ID
+    const selectedAgentId = useSettingsStoreInstance.selectedAgentId || '';
+
     
     // Use agent-chat endpoint when agent is enabled, otherwise use knowledge-chat
     const endpoint = agentEnabled ? '/api/v1/agent-chat' : '/api/v1/knowledge-chat';
@@ -333,10 +327,13 @@ const sendMsg = async (value, modelId = '') => {
     await startStream({ 
         session_id: session_id.value, 
         knowledge_base_ids: kbIds,
+        knowledge_ids: knowledgeIds,
         agent_enabled: agentEnabled,
+        agent_id: selectedAgentId,  // 传递选中的智能体 ID
         web_search_enabled: webSearchEnabled,
         summary_model_id: modelId,
         mcp_service_ids: mcpServiceIds,
+        mentioned_items: mentionedItems,
         query: value, 
         method: 'POST', 
         url: endpoint
@@ -796,7 +793,7 @@ onMounted(async () => {
     checkmenuTitle(session_id.value)
     if (firstQuery.value) {
         scrollLock.value = true;
-        sendMsg(firstQuery.value);
+        sendMsg(firstQuery.value, '', firstMentionedItems.value || []);
         usemenuStore.changeFirstQuery('');
     } else {
         scrollLock.value = false;

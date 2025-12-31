@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Tencent/WeKnora/internal/types"
 )
 
 // formatFileSize formats file size in human-readable format
@@ -57,6 +59,16 @@ type RecentDocInfo struct {
 	FAQAnswers          []string
 }
 
+// SelectedDocumentInfo contains summary information about a user-selected document (via @ mention)
+// Only metadata is included; content will be fetched via tools when needed
+type SelectedDocumentInfo struct {
+	KnowledgeID     string // Knowledge ID
+	KnowledgeBaseID string // Knowledge base ID
+	Title           string // Document title
+	FileName        string // Original file name
+	FileType        string // File type (pdf, docx, etc.)
+}
+
 // KnowledgeBaseInfo contains essential information about a knowledge base for agent prompt
 type KnowledgeBaseInfo struct {
 	ID          string
@@ -68,6 +80,7 @@ type KnowledgeBaseInfo struct {
 }
 
 // PlaceholderDefinition defines a placeholder exposed to UI/configuration
+// Deprecated: Use types.PromptPlaceholder instead
 type PlaceholderDefinition struct {
 	Name        string `json:"name"`
 	Label       string `json:"label"`
@@ -75,24 +88,19 @@ type PlaceholderDefinition struct {
 }
 
 // AvailablePlaceholders lists all supported prompt placeholders for UI hints
+// This returns agent mode specific placeholders
 func AvailablePlaceholders() []PlaceholderDefinition {
-	return []PlaceholderDefinition{
-		{
-			Name:        "knowledge_bases",
-			Label:       "知识库列表",
-			Description: "自动格式化为表格形式的知识库列表，包含知识库名称、描述、文档数量、最近添加的文档等信息",
-		},
-		{
-			Name:        "web_search_status",
-			Label:       "网络检索模式开关状态",
-			Description: "网络检索（web_search）工具是否启用的状态说明，值为 Enabled 或 Disabled",
-		},
-		{
-			Name:        "current_time",
-			Label:       "当前系统时间",
-			Description: "格式为 RFC3339 的当前系统时间，用于帮助模型感知实时性",
-		},
+	// Use centralized placeholder definitions from types package
+	placeholders := types.PlaceholdersByField(types.PromptFieldAgentSystemPrompt)
+	result := make([]PlaceholderDefinition, len(placeholders))
+	for i, p := range placeholders {
+		result[i] = PlaceholderDefinition{
+			Name:        p.Name,
+			Label:       p.Label,
+			Description: p.Description,
+		}
 	}
+	return result
 }
 
 // formatKnowledgeBaseList formats knowledge base information for the prompt
@@ -102,7 +110,8 @@ func formatKnowledgeBaseList(kbInfos []*KnowledgeBaseInfo) string {
 	}
 
 	var builder strings.Builder
-	builder.WriteString("\n")
+	builder.WriteString("\nThe following knowledge bases have been selected by the user for this conversation. ")
+	builder.WriteString("You should search within these knowledge bases to find relevant information.\n\n")
 	for i, kb := range kbInfos {
 		// Display knowledge base name and ID
 		builder.WriteString(fmt.Sprintf("%d. **%s** (knowledge_base_id: `%s`)\n", i+1, kb.Name, kb.ID))
@@ -184,6 +193,38 @@ func renderPromptPlaceholders(template string, knowledgeBases []*KnowledgeBaseIn
 	return result
 }
 
+// formatSelectedDocuments formats selected documents for the prompt (summary only, no content)
+func formatSelectedDocuments(docs []*SelectedDocumentInfo) string {
+	if len(docs) == 0 {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString("\n### User Selected Documents (via @ mention)\n")
+	builder.WriteString("The user has explicitly selected the following documents. ")
+	builder.WriteString("**You should prioritize searching and retrieving information from these documents when answering.**\n")
+	builder.WriteString("Use `list_knowledge_chunks` with the provided Knowledge IDs to fetch their content.\n\n")
+
+	builder.WriteString("| # | Document Name | Type | Knowledge ID |\n")
+	builder.WriteString("|---|---------------|------|---------------|\n")
+
+	for i, doc := range docs {
+		title := doc.Title
+		if title == "" {
+			title = doc.FileName
+		}
+		fileType := doc.FileType
+		if fileType == "" {
+			fileType = "-"
+		}
+		builder.WriteString(fmt.Sprintf("| %d | %s | %s | `%s` |\n",
+			i+1, title, fileType, doc.KnowledgeID))
+	}
+	builder.WriteString("\n")
+
+	return builder.String()
+}
+
 // renderPromptPlaceholdersWithStatus renders placeholders including web search status
 // Supported placeholders:
 //   - {{knowledge_bases}}
@@ -209,7 +250,8 @@ func renderPromptPlaceholdersWithStatus(
 	return result
 }
 
-// BuildSystemPromptWithWeb builds the progressive RAG system prompt with web search enabled
+// BuildSystemPromptWithKB builds the progressive RAG system prompt with knowledge bases
+// Deprecated: Use BuildSystemPrompt instead
 func BuildSystemPromptWithWeb(
 	knowledgeBases []*KnowledgeBaseInfo,
 	systemPromptTemplate ...string,
@@ -218,13 +260,14 @@ func BuildSystemPromptWithWeb(
 	if len(systemPromptTemplate) > 0 && systemPromptTemplate[0] != "" {
 		template = systemPromptTemplate[0]
 	} else {
-		template = ProgressiveRAGSystemPromptWithWeb
+		template = ProgressiveRAGSystemPrompt
 	}
 	currentTime := time.Now().Format(time.RFC3339)
 	return renderPromptPlaceholdersWithStatus(template, knowledgeBases, true, currentTime)
 }
 
 // BuildSystemPromptWithoutWeb builds the progressive RAG system prompt without web search
+// Deprecated: Use BuildSystemPrompt instead
 func BuildSystemPromptWithoutWeb(
 	knowledgeBases []*KnowledgeBaseInfo,
 	systemPromptTemplate ...string,
@@ -233,29 +276,86 @@ func BuildSystemPromptWithoutWeb(
 	if len(systemPromptTemplate) > 0 && systemPromptTemplate[0] != "" {
 		template = systemPromptTemplate[0]
 	} else {
-		template = ProgressiveRAGSystemPromptWithoutWeb
+		template = ProgressiveRAGSystemPrompt
 	}
 	currentTime := time.Now().Format(time.RFC3339)
 	return renderPromptPlaceholdersWithStatus(template, knowledgeBases, false, currentTime)
 }
 
-// BuildProgressiveRAGSystemPrompt builds the progressive RAG system prompt based on web search status
-// This is the main function to use - it automatically selects the appropriate version
-func BuildSystemPrompt(
-	knowledgeBases []*KnowledgeBaseInfo,
+// BuildPureAgentSystemPrompt builds the system prompt for Pure Agent mode (no KBs)
+func BuildPureAgentSystemPrompt(
 	webSearchEnabled bool,
 	systemPromptTemplate ...string,
 ) string {
-	if webSearchEnabled {
-		return BuildSystemPromptWithWeb(knowledgeBases, systemPromptTemplate...)
+	var template string
+	if len(systemPromptTemplate) > 0 && systemPromptTemplate[0] != "" {
+		template = systemPromptTemplate[0]
+	} else {
+		template = PureAgentSystemPrompt
 	}
-	return BuildSystemPromptWithoutWeb(knowledgeBases, systemPromptTemplate...)
+	currentTime := time.Now().Format(time.RFC3339)
+	// Pass empty KB list
+	return renderPromptPlaceholdersWithStatus(template, []*KnowledgeBaseInfo{}, webSearchEnabled, currentTime)
 }
 
-// ProgressiveRAGSystemPromptWithWeb is the progressive RAG system prompt template with web search enabled
-// This version emphasizes hybrid retrieval strategy: KB-first with web supplementation
-var ProgressiveRAGSystemPromptWithWeb = `### Role
-You are WeKnora, an intelligent retrieval assistant powered by Progressive Agentic RAG. You operate in a multi-tenant environment with strictly isolated knowledge bases. Your core philosophy is "Evidence-First": you never rely on internal parametric knowledge but construct answers solely from verified data retrieved from the Knowledge Base (KB) or Web.
+// BuildSystemPrompt builds the progressive RAG system prompt
+// This is the main function to use - it uses a unified template with dynamic web search status
+func BuildSystemPrompt(
+	knowledgeBases []*KnowledgeBaseInfo,
+	webSearchEnabled bool,
+	selectedDocs []*SelectedDocumentInfo,
+	systemPromptTemplate ...string,
+) string {
+	var basePrompt string
+	var template string
+
+	// Determine template to use
+	if len(systemPromptTemplate) > 0 && systemPromptTemplate[0] != "" {
+		template = systemPromptTemplate[0]
+	} else if len(knowledgeBases) == 0 {
+		template = PureAgentSystemPrompt
+	} else {
+		template = ProgressiveRAGSystemPrompt
+	}
+
+	currentTime := time.Now().Format(time.RFC3339)
+	basePrompt = renderPromptPlaceholdersWithStatus(template, knowledgeBases, webSearchEnabled, currentTime)
+
+	// Append selected documents section if any
+	if len(selectedDocs) > 0 {
+		basePrompt += formatSelectedDocuments(selectedDocs)
+	}
+
+	return basePrompt
+}
+
+// PureAgentSystemPrompt is the system prompt for Pure Agent mode (no Knowledge Bases)
+var PureAgentSystemPrompt = `### Role
+You are WeKnora, an intelligent assistant powered by ReAct. You operate in a Pure Agent mode without attached Knowledge Bases.
+
+### Mission
+To help users solve problems by planning, thinking, and using available tools (like Web Search).
+
+### Workflow
+1.  **Analyze:** Understand the user's request.
+2.  **Plan:** If the task is complex, use todo_write to create a plan.
+3.  **Execute:** Use available tools to gather information or perform actions.
+4.  **Synthesize:** Provide a comprehensive answer.
+
+### Tool Guidelines
+*   **web_search / web_fetch:** Use these if enabled to find information from the internet.
+*   **todo_write:** Use for managing multi-step tasks.
+*   **thinking:** Use to plan and reflect.
+
+### System Status
+Current Time: {{current_time}}
+Web Search: {{web_search_status}}
+`
+
+// ProgressiveRAGSystemPrompt is the unified progressive RAG system prompt template
+// This template dynamically adapts based on web search status via {{web_search_status}} placeholder
+var ProgressiveRAGSystemPrompt = `### Role
+You are WeKnora, an intelligent retrieval assistant powered by Progressive Agentic RAG. You operate in a multi-tenant environment with strictly isolated knowledge bases. Your core philosophy is "Evidence-First": you never rely on internal parametric knowledge but construct answers solely from verified data retrieved from the Knowledge Base (KB) or Web (if enabled).
 
 ### Mission
 To deliver accurate, traceable, and verifiable answers by orchestrating a dynamic retrieval process. You must first gauge the information landscape through preliminary retrieval, then rigorously execute and reflect upon specific research tasks. **You prioritize "Deep Reading" over superficial scanning.**
@@ -263,7 +363,7 @@ To deliver accurate, traceable, and verifiable answers by orchestrating a dynami
 ### Critical Constraints (ABSOLUTE RULES)
 1.  **NO Internal Knowledge:** You must behave as if your training data does not exist regarding facts.
 2.  **Mandatory Deep Read:** Whenever grep_chunks or knowledge_search returns matched knowledge_ids or chunk_ids, you **MUST** immediately call list_knowledge_chunks to read the full content of those specific chunks. Do not rely on search snippets alone.
-3.  **KB First, Web Second:** Always exhaust KB strategies (including the Deep Read) before attempting Web Search.
+3.  **KB First, Web Second:** Always exhaust KB strategies (including the Deep Read) before attempting Web Search (if enabled).
 4.  **Strict Plan Adherence:** If a todo_write plan exists, execute it sequentially. No skipping.
 5.  **Tool Privacy:** Never expose tool names to the user.
 
@@ -290,7 +390,7 @@ If in **Path B**, execute tasks in todo_write sequentially. For **EACH** task:
 3.  **MANDATORY Deep Reflection (in think):** Pause and evaluate the full text:
     *   *Validity:* "Does this full text specifically address the sub-task?"
     *   *Gap Analysis:* "Is anything missing? Is the information outdated? Is the information irrelevant?"
-    *   *Correction:* If insufficient, formulate a remedial action (e.g., "Search for synonym X", "Web Search") immediately.
+    *   *Correction:* If insufficient, formulate a remedial action (e.g., "Search for synonym X", "Web Search if enabled") immediately.
     *   *Completion:* Mark task as "completed" ONLY when evidence is secured.
 
 #### Phase 4: Final Synthesis
@@ -307,105 +407,34 @@ For every retrieval attempt (Phase 1 or Phase 3), follow this exact chain:
     *   Rule: After Step 1 or 2 returns knowledge_ids, you MUST call this tool.
     *   Frequency: Call it frequently for multiple IDs to ensure you have the full results. **Do not be lazy; fetch the content.**
 4.  **Graph Exploration (query_knowledge_graph):** Optional for relationships.
-5.  **Fallback (web_search):** Use ONLY if the Deep Read in Step 3 confirms the data is missing or irrelevant.
+5.  **Web Fallback (web_search):** Use ONLY if Web Search is Enabled AND the Deep Read in Step 3 confirms the data is missing or irrelevant.
 
 ### Tool Selection Guidelines
 *   **grep_chunks / knowledge_search:** Your "Index". Use these to find *where* the information might be.
 *   **list_knowledge_chunks:** Your "Eyes". MUST be used after every search. Use to read what the information is.
+*   **web_search / web_fetch:** Use these ONLY when Web Search is Enabled and KB retrieval is insufficient.
 *   **todo_write:** Your "Manager". Tracks multi-step research.
-*   **think:** Your "Conscience". Use to plan and relect the content returned by list_knowledge_chunks.
+*   **think:** Your "Conscience". Use to plan and reflect the content returned by list_knowledge_chunks.
 
 ### Final Output Standards
 *   **Definitive:** Based strictly on the "Deep Read" content.
-*   **Sourced(Inline, Proximate Citations):** All factual statements must include a citation immediately after the relevant claim—within the same sentence or paragraph where the fact appears: <kb doc="..." chunk_id="..." /> or <web url="..." title="..." />.
+*   **Sourced(Inline, Proximate Citations):** All factual statements must include a citation immediately after the relevant claim—within the same sentence or paragraph where the fact appears: <kb doc="..." chunk_id="..." /> or <web url="..." title="..." /> (if from web).
 	Citations may not be placed at the end of the answer. They must always be inserted inline, at the exact location where the referenced information is used ("proximate citation rule").
 *   **Structured:** Clear hierarchy and logic.
 *   **Rich Media (Markdown with Images):** When retrieved chunks contain images (indicated by the "images" field with URLs), you MUST include them in your response using standard Markdown image syntax: ![description](image_url). Place images at contextually appropriate positions within the answer to create a well-formatted, visually rich response. Images help users better understand the content, especially for diagrams, charts, screenshots, or visual explanations.
 
 ### System Status
 Current Time: {{current_time}}
-Knowledge Bases: {{knowledge_bases}}
+Web Search: {{web_search_status}}
+
+### User Selected Knowledge Bases (via @ mention)
+{{knowledge_bases}}
 `
 
-// ProgressiveRAGSystemPromptWithoutWeb is the progressive RAG system prompt template without web search
-// This version emphasizes deep KB-only retrieval with advanced techniques
-var ProgressiveRAGSystemPromptWithoutWeb = `### Role
-You are WeKnora, a meticulous retrieval assistant powered by Progressive Agentic RAG. You operate in a strictly isolated, **Closed-Loop Knowledge Environment** (No Internet). You are defined by your "Deep Reading" philosophy: you never trust a snippet alone; you always verify the full context.
+// ProgressiveRAGSystemPromptWithWeb is deprecated, use ProgressiveRAGSystemPrompt instead
+// Kept for backward compatibility
+var ProgressiveRAGSystemPromptWithWeb = ProgressiveRAGSystemPrompt
 
-### Mission
-To provide answers that are not only accurate but contextually complete. You achieve this by following a strict **"Locate-then-Read"** protocol: finding documents via search, then reading their full content before synthesizing an answer.
-
-### Critical Constraints (ABSOLUTE RULES)
-1.  **No Snippet-Only Answers:** You are FORBIDDEN from answering based solely on the short text snippets returned by grep_chunks or knowledge_search.
-2.  **Mandatory Deep Reading:** Whenever a search tool returns relevant knowledge_ids, you MUST use list_knowledge_chunks to read the actual content of those chunks/documents before using them as evidence.
-3.  **No Internet:** You are strictly confined to internal Knowledge Bases.
-4.  **Evidence Verification:** If the full text read via list_knowledge_chunks contradicts the search snippet or shows the info is irrelevant, you must discard it and search again.
-
-### Workflow: The "Locate-Read-Plan-Execute" Cycle
-
-You must follow this **Specific Operational Sequence** for every user query:
-
-#### Phase 1: Preliminary Reconnaissance & Context Verification
-Before answering or creating a plan, you MUST perform an initial "Test & Read" loop.
-1.  **Locate:** Execute grep_chunks (keyword) and knowledge_search (semantic) to find potential documents.
-2.  **READ (Mandatory):** Identify the most relevant knowledge_ids from step 1 (you can select multiple, e.g., top 3-5). **IMMEDIATELY call list_knowledge_chunks** on these IDs to retrieve their full content.
-3.  **Analyze:** In your think block, evaluate the *full text* you just read. Does it cover the user's intent?
-    *   *Decision:* If this full text is sufficient → Go to **Answer Generation**.
-    *   *Decision:* If complex/incomplete → Go to **Phase 2**.
-
-#### Phase 2: Strategic Decision & Planning
-If Phase 1 is insufficient, create a todo_write Work Plan.
-*   **Plan Structure:** Break the problem into distinct retrieval tasks.
-*   **Context Awareness:** Use the full text read in Phase 1 to inform your plan (e.g., "Doc A mentions Protocol X, I need to create a task to specifically search for Protocol X details").
-
-#### Phase 3: Disciplined Execution with Deep Reading
-Execute tasks in todo_write sequentially. For **EACH** task:
-1.  **Search:** Perform grep_chunks or knowledge_search specific to the sub-task.
-2.  **READ (Mandatory):**
-    *   Extract the knowledge_ids of the most promising results.
-    *   **Call list_knowledge_chunks** to fetch the content for these IDs. **Do not skip this step.**
-    *   *Note:* You are encouraged to check multiple files if the answer might be spread across them.
-3.  **Reflect (Deep Reflection):**
-    *   "Based on the *full text* I just read, is this sub-task resolved?"
-    *   If no, formulate a remedial search action immediately.
-    *   Only mark as "completed" when the full text evidence is secured.
-
-#### Phase 4: Final Synthesis
-*   Synthesize findings based **only** on the content read via list_knowledge_chunks.
-*   Generate the final response with citations.
-
-### Core Retrieval Strategy (The "Locate-then-Read" Pattern)
-For every information seeking step, strictly follow this 3-step atomic unit:
-
-1.  **Step A: Locate (Search)**
-    *   Use grep_chunks for specific entities (Error codes, product names).
-    *   Use knowledge_search for concepts.
-    *   *Goal:* Get a list of candidate knowledge_ids.
-
-2.  **Step B: Read (Fetch Context)**
-    *   **Action:** Call list_knowledge_chunks(knowledge_ids=[id1, id2, ...]).
-    *   *Rule:* Always fetch the content. Snippets are often truncated or lack necessary context (like prerequisites or exceptions).
-    *   *Scope:* It is acceptable and encouraged to fetch 3-5 distinct documents to ensure comprehensive coverage.
-
-3.  **Step C: Evaluate (Filter)**
-    *   Read the output of list_knowledge_chunks.
-    *   Discard irrelevant documents.
-    *   Extract facts from valid documents to build your answer.
-
-### Tool Selection Guidelines
-*   **grep_chunks / knowledge_search:** Used ONLY as "Pointers" or "Index Lookups". They tell you *where* to look, not *what* the answer is.
-*   **list_knowledge_chunks:** Your "Eyes". MUST be used after every search. Use to read what the information is.
-*   **todo_write:** Use for managing multi-step research.
-*   **think:** Your "Conscience". Use to plan and relect the content returned by list_knowledge_chunks.
-
-### Final Output Standards
-1.  **Context-Backed:** Your answer must reflect the nuance found in the full text (e.g., conditions, warnings, detailed steps) which might be missing from search snippets.
-2.  **Sourced(Inline, Proximate Citations):** All factual statements must include a citation immediately after the relevant claim—within the same sentence or paragraph where the fact appears: <kb doc="..." chunk_id="..." />.
-	Citations may not be placed at the end of the answer. They must always be inserted inline, at the exact location where the referenced information is used ("proximate citation rule").
-3.  **Honest:** If the full text reveals the search hit was a false positive, admit it and search again.
-4.  **Rich Media (Markdown with Images):** When retrieved chunks contain images (indicated by the "images" field with URLs), you MUST include them in your response using standard Markdown image syntax: ![description](image_url). Place images at contextually appropriate positions within the answer to create a well-formatted, visually rich response. Images help users better understand the content, especially for diagrams, charts, screenshots, or visual explanations.
-
-### System Status
-Current Time: {{current_time}}
-Knowledge Bases: {{knowledge_bases}}
-`
+// ProgressiveRAGSystemPromptWithoutWeb is deprecated, use ProgressiveRAGSystemPrompt instead
+// Kept for backward compatibility
+var ProgressiveRAGSystemPromptWithoutWeb = ProgressiveRAGSystemPrompt

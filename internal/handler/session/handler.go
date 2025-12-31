@@ -1,7 +1,6 @@
 package session
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -20,6 +19,7 @@ type Handler struct {
 	streamManager        interfaces.StreamManager        // Manager for handling streaming responses
 	config               *config.Config                  // Application configuration
 	knowledgebaseService interfaces.KnowledgeBaseService // Service for managing knowledge bases
+	customAgentService   interfaces.CustomAgentService   // Service for managing custom agents
 }
 
 // NewHandler creates a new instance of Handler with all necessary dependencies
@@ -29,6 +29,7 @@ func NewHandler(
 	streamManager interfaces.StreamManager,
 	config *config.Config,
 	knowledgebaseService interfaces.KnowledgeBaseService,
+	customAgentService interfaces.CustomAgentService,
 ) *Handler {
 	return &Handler{
 		sessionService:       sessionService,
@@ -36,10 +37,22 @@ func NewHandler(
 		streamManager:        streamManager,
 		config:               config,
 		knowledgebaseService: knowledgebaseService,
+		customAgentService:   customAgentService,
 	}
 }
 
-// CreateSession handles the creation of a new conversation session
+// CreateSession godoc
+// @Summary      创建会话
+// @Description  创建新的对话会话
+// @Tags         会话
+// @Accept       json
+// @Produce      json
+// @Param        request  body      CreateSessionRequest  true  "会话创建请求"
+// @Success      201      {object}  map[string]interface{}  "创建的会话"
+// @Failure      400      {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /sessions [post]
 func (h *Handler) CreateSession(c *gin.Context) {
 	ctx := c.Request.Context()
 	// Parse and validate the request body
@@ -60,75 +73,17 @@ func (h *Handler) CreateSession(c *gin.Context) {
 
 	// Validate session creation request
 	// Sessions are now knowledge-base-independent:
-	// - KnowledgeBaseID is optional during session creation
-	// - Knowledge base can be specified in each query request (AgentQA/KnowledgeQA)
-	// - Agent mode can access multiple knowledge bases via AgentConfig.KnowledgeBases
-	// - Knowledge base can be switched during conversation
-	isAgentMode := request.AgentConfig != nil && request.AgentConfig.AgentModeEnabled
-	hasAgentKnowledgeBases := request.AgentConfig != nil && len(request.AgentConfig.KnowledgeBases) > 0
-
+	// - All configuration comes from custom agent at query time
+	// - Session only stores basic info (tenant ID, title, etc.)
 	logger.Infof(
 		ctx,
-		"Processing session creation request, tenant ID: %d, knowledge base ID: %s, agent mode: %v, agent KBs: %v",
+		"Processing session creation request, tenant ID: %d",
 		tenantID,
-		request.KnowledgeBaseID,
-		isAgentMode,
-		hasAgentKnowledgeBases,
 	)
 
 	// Create session object with base properties
 	createdSession := &types.Session{
-		TenantID:        tenantID.(uint64),
-		KnowledgeBaseID: request.KnowledgeBaseID,
-		AgentConfig:     request.AgentConfig, // Set agent config if provided
-	}
-
-	// If summary model parameters are empty, set defaults
-	if request.SessionStrategy != nil {
-		createdSession.RerankModelID = request.SessionStrategy.RerankModelID
-		createdSession.SummaryModelID = request.SessionStrategy.SummaryModelID
-		createdSession.MaxRounds = request.SessionStrategy.MaxRounds
-		createdSession.EnableRewrite = request.SessionStrategy.EnableRewrite
-		createdSession.FallbackStrategy = request.SessionStrategy.FallbackStrategy
-		createdSession.FallbackResponse = request.SessionStrategy.FallbackResponse
-		createdSession.EmbeddingTopK = request.SessionStrategy.EmbeddingTopK
-		createdSession.KeywordThreshold = request.SessionStrategy.KeywordThreshold
-		createdSession.VectorThreshold = request.SessionStrategy.VectorThreshold
-		createdSession.RerankTopK = request.SessionStrategy.RerankTopK
-		createdSession.RerankThreshold = request.SessionStrategy.RerankThreshold
-		if request.SessionStrategy.SummaryParameters != nil {
-			createdSession.SummaryParameters = request.SessionStrategy.SummaryParameters
-		} else {
-			createdSession.SummaryParameters = h.createDefaultSummaryConfig(ctx)
-		}
-		h.fillSummaryConfigDefaults(ctx, createdSession.SummaryParameters)
-
-		logger.Debug(ctx, "Custom session strategy set")
-	} else {
-		tenantInfo, _ := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
-		h.applyConversationDefaults(ctx, createdSession, tenantInfo)
-		logger.Debug(ctx, "Using default session strategy")
-	}
-
-	// Fetch knowledge base if KnowledgeBaseID is provided to inherit its model configurations
-	// If no KB is provided, models will be determined at query time or use tenant/system defaults
-	if request.KnowledgeBaseID != "" {
-		kb, err := h.knowledgebaseService.GetKnowledgeBaseByID(ctx, request.KnowledgeBaseID)
-		if err != nil {
-			logger.Error(ctx, "Failed to get knowledge base", err)
-			c.Error(errors.NewInternalServerError(err.Error()))
-			return
-		}
-
-		// Use knowledge base's summary model if session doesn't specify it
-		if createdSession.SummaryModelID == "" {
-			createdSession.SummaryModelID = kb.SummaryModelID
-		}
-
-		logger.Debugf(ctx, "Knowledge base fetched: %s, summary model: %s",
-			kb.ID, kb.SummaryModelID)
-	} else {
-		logger.Debug(ctx, "No knowledge base ID provided, models will use session strategy or be determined at query time")
+		TenantID: tenantID.(uint64),
 	}
 
 	// Call service to create session
@@ -148,46 +103,18 @@ func (h *Handler) CreateSession(c *gin.Context) {
 	})
 }
 
-func (h *Handler) applyConversationDefaults(ctx context.Context, session *types.Session, tenant *types.Tenant) {
-	session.MaxRounds = h.config.Conversation.MaxRounds
-	session.EnableRewrite = h.config.Conversation.EnableRewrite
-	session.FallbackStrategy = types.FallbackStrategy(h.config.Conversation.FallbackStrategy)
-	session.FallbackResponse = h.config.Conversation.FallbackResponse
-	session.EmbeddingTopK = h.config.Conversation.EmbeddingTopK
-	session.KeywordThreshold = h.config.Conversation.KeywordThreshold
-	session.VectorThreshold = h.config.Conversation.VectorThreshold
-	session.RerankThreshold = h.config.Conversation.RerankThreshold
-	session.RerankTopK = h.config.Conversation.RerankTopK
-	session.RerankModelID = ""
-	session.SummaryModelID = ""
-
-	if tenant != nil && tenant.ConversationConfig != nil {
-		tc := tenant.ConversationConfig
-		session.MaxRounds = tc.MaxRounds
-		session.EnableRewrite = tc.EnableRewrite
-		if tc.FallbackStrategy != "" {
-			session.FallbackStrategy = types.FallbackStrategy(tc.FallbackStrategy)
-		}
-		if tc.FallbackResponse != "" {
-			session.FallbackResponse = tc.FallbackResponse
-		}
-		session.EmbeddingTopK = tc.EmbeddingTopK
-		session.KeywordThreshold = tc.KeywordThreshold
-		session.VectorThreshold = tc.VectorThreshold
-		session.RerankThreshold = tc.RerankThreshold
-		session.RerankTopK = tc.RerankTopK
-		if tc.RerankModelID != "" {
-			session.RerankModelID = tc.RerankModelID
-		}
-		if tc.SummaryModelID != "" {
-			session.SummaryModelID = tc.SummaryModelID
-		}
-	}
-
-	session.SummaryParameters = h.createDefaultSummaryConfig(ctx)
-}
-
-// GetSession retrieves a session by its ID
+// GetSession godoc
+// @Summary      获取会话详情
+// @Description  根据ID获取会话详情
+// @Tags         会话
+// @Accept       json
+// @Produce      json
+// @Param        id   path      string  true  "会话ID"
+// @Success      200  {object}  map[string]interface{}  "会话详情"
+// @Failure      404  {object}  errors.AppError         "会话不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /sessions/{id} [get]
 func (h *Handler) GetSession(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -223,7 +150,19 @@ func (h *Handler) GetSession(c *gin.Context) {
 	})
 }
 
-// GetSessionsByTenant retrieves all sessions for the current tenant with pagination
+// GetSessionsByTenant godoc
+// @Summary      获取会话列表
+// @Description  获取当前租户的会话列表，支持分页
+// @Tags         会话
+// @Accept       json
+// @Produce      json
+// @Param        page       query     int  false  "页码"
+// @Param        page_size  query     int  false  "每页数量"
+// @Success      200        {object}  map[string]interface{}  "会话列表"
+// @Failure      400        {object}  errors.AppError         "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /sessions [get]
 func (h *Handler) GetSessionsByTenant(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -253,7 +192,19 @@ func (h *Handler) GetSessionsByTenant(c *gin.Context) {
 	})
 }
 
-// UpdateSession updates an existing session's properties
+// UpdateSession godoc
+// @Summary      更新会话
+// @Description  更新会话属性
+// @Tags         会话
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string         true  "会话ID"
+// @Param        request  body      types.Session  true  "会话信息"
+// @Success      200      {object}  map[string]interface{}  "更新后的会话"
+// @Failure      404      {object}  errors.AppError         "会话不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /sessions/{id} [put]
 func (h *Handler) UpdateSession(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -304,7 +255,18 @@ func (h *Handler) UpdateSession(c *gin.Context) {
 	})
 }
 
-// DeleteSession deletes a session by its ID
+// DeleteSession godoc
+// @Summary      删除会话
+// @Description  删除指定的会话
+// @Tags         会话
+// @Accept       json
+// @Produce      json
+// @Param        id   path      string  true  "会话ID"
+// @Success      200  {object}  map[string]interface{}  "删除成功"
+// @Failure      404  {object}  errors.AppError         "会话不存在"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /sessions/{id} [delete]
 func (h *Handler) DeleteSession(c *gin.Context) {
 	ctx := c.Request.Context()
 

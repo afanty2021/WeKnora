@@ -5,6 +5,7 @@ package container
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
@@ -83,6 +84,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(initOllamaService))
 	must(container.Provide(initNeo4jClient))
 	must(container.Provide(stream.NewStreamManager))
+	must(container.Provide(NewDuckDB))
 
 	// Data repositories layer
 	must(container.Provide(repository.NewTenantRepository))
@@ -97,6 +99,8 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewAuthTokenRepository))
 	must(container.Provide(neo4jRepo.NewNeo4jRepository))
 	must(container.Provide(repository.NewMCPServiceRepository))
+	must(container.Provide(repository.NewCustomAgentRepository))
+	must(container.Provide(service.NewWebSearchStateService))
 
 	// MCP manager for managing MCP client connections
 	must(container.Provide(mcp.NewMCPManager))
@@ -112,9 +116,14 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewDatasetService))
 	must(container.Provide(service.NewEvaluationService))
 	must(container.Provide(service.NewUserService))
-	must(container.Provide(service.NewChunkExtractService))
+
+	// Extract services - register individual extracters with names
+	must(container.Provide(service.NewChunkExtractService, dig.Name("chunkExtracter")))
+	must(container.Provide(service.NewDataTableSummaryService, dig.Name("dataTableSummary")))
+
 	must(container.Provide(service.NewMessageService))
 	must(container.Provide(service.NewMCPServiceService))
+	must(container.Provide(service.NewCustomAgentService))
 
 	// Web search service (needed by AgentService)
 	must(container.Provide(service.NewWebSearchService))
@@ -137,12 +146,14 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Invoke(chatpipline.NewPluginSearch))
 	must(container.Invoke(chatpipline.NewPluginRerank))
 	must(container.Invoke(chatpipline.NewPluginMerge))
+	must(container.Invoke(chatpipline.NewPluginDataAnalysis))
 	must(container.Invoke(chatpipline.NewPluginIntoChatMessage))
 	must(container.Invoke(chatpipline.NewPluginChatCompletion))
 	must(container.Invoke(chatpipline.NewPluginChatCompletionStream))
 	must(container.Invoke(chatpipline.NewPluginStreamFilter))
 	must(container.Invoke(chatpipline.NewPluginFilterTopK))
 	must(container.Invoke(chatpipline.NewPluginRewrite))
+	must(container.Invoke(chatpipline.NewPluginLoadHistory))
 	must(container.Invoke(chatpipline.NewPluginExtractEntity))
 	must(container.Invoke(chatpipline.NewPluginSearchEntity))
 	must(container.Invoke(chatpipline.NewPluginSearchParallel))
@@ -163,6 +174,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewSystemHandler))
 	must(container.Provide(handler.NewMCPServiceHandler))
 	must(container.Provide(handler.NewWebSearchHandler))
+	must(container.Provide(handler.NewCustomAgentHandler))
 
 	// Router configuration
 	must(container.Provide(router.NewRouter))
@@ -595,4 +607,25 @@ func initNeo4jClient() (neo4j.Driver, error) {
 	}
 
 	return nil, fmt.Errorf("failed to connect to Neo4j after %d attempts: %w", maxRetries, err)
+}
+
+func NewDuckDB() (*sql.DB, error) {
+	sqlDB, err := sql.Open("duckdb", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open duckdb: %w", err)
+	}
+	ctx := context.Background()
+	// Install and load the spatial extension which includes Excel support
+	// Note: DuckDB doesn't have native Excel support, we need to use a workaround
+	// Option 1: Install spatial extension (if available)
+	installSQL := "INSTALL spatial;"
+	if _, err := sqlDB.ExecContext(ctx, installSQL); err != nil {
+		logger.Warnf(ctx, "[DuckDB] Failed to install spatial extension (may already be installed): %v", err)
+	}
+
+	loadSQL := "LOAD spatial;"
+	if _, err := sqlDB.ExecContext(ctx, loadSQL); err != nil {
+		logger.Warnf(ctx, "[DuckDB] Failed to load spatial extension: %v", err)
+	}
+	return sqlDB, nil
 }

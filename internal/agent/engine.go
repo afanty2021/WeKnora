@@ -29,6 +29,7 @@ type AgentEngine struct {
 	chatModel            chat.Chat
 	eventBus             *event.EventBus
 	knowledgeBasesInfo   []*KnowledgeBaseInfo      // Detailed knowledge base information for prompt
+	selectedDocs         []*SelectedDocumentInfo   // User-selected documents (via @ mention)
 	contextManager       interfaces.ContextManager // Context manager for writing agent conversation to LLM context
 	sessionID            string                    // Session ID for context management
 	systemPromptTemplate string                    // System prompt template (optional, uses default if empty)
@@ -50,6 +51,7 @@ func NewAgentEngine(
 	toolRegistry *tools.ToolRegistry,
 	eventBus *event.EventBus,
 	knowledgeBasesInfo []*KnowledgeBaseInfo,
+	selectedDocs []*SelectedDocumentInfo,
 	contextManager interfaces.ContextManager,
 	sessionID string,
 	systemPromptTemplate string,
@@ -63,6 +65,7 @@ func NewAgentEngine(
 		chatModel:            chatModel,
 		eventBus:             eventBus,
 		knowledgeBasesInfo:   knowledgeBasesInfo,
+		selectedDocs:         selectedDocs,
 		contextManager:       contextManager,
 		sessionID:            sessionID,
 		systemPromptTemplate: systemPromptTemplate,
@@ -77,6 +80,9 @@ func (e *AgentEngine) Execute(
 	llmContext []chat.Message,
 ) (*types.AgentState, error) {
 	logger.Infof(ctx, "========== Agent Execution Started ==========")
+	// Ensure tools are cleaned up after execution
+	defer e.toolRegistry.Cleanup(ctx)
+
 	logger.Infof(ctx, "[Agent] SessionID: %s, MessageID: %s", sessionID, messageID)
 	logger.Infof(ctx, "[Agent] User Query: %s", query)
 	logger.Infof(ctx, "[Agent] LLM Context Messages: %d", len(llmContext))
@@ -99,6 +105,7 @@ func (e *AgentEngine) Execute(
 	systemPrompt := BuildSystemPrompt(
 		e.knowledgeBasesInfo,
 		e.config.WebSearchEnabled,
+		e.selectedDocs,
 		e.systemPromptTemplate,
 	)
 	logger.Debugf(ctx, "[Agent] SystemPrompt Length: %d characters", len(systemPrompt))
@@ -300,7 +307,7 @@ func (e *AgentEngine) executeLoop(
 					"tool_call_id": tc.ID,
 					"tool_index":   fmt.Sprintf("%d/%d", i+1, len(response.ToolCalls)),
 				})
-				result, err := e.toolRegistry.ExecuteTool(ctx, tc.Function.Name, args)
+				result, err := e.toolRegistry.ExecuteTool(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 				duration := time.Since(toolCallStartTime).Milliseconds()
 				logger.Infof(ctx, "[Agent][Round-%d][Tool-%d/%d] Tool execution completed in %dms",
 					state.CurrentRound+1, i+1, len(response.ToolCalls), duration)
@@ -774,6 +781,7 @@ func (e *AgentEngine) streamFinalAnswerToEventBus(
 	systemPrompt := BuildSystemPrompt(
 		e.knowledgeBasesInfo,
 		e.config.WebSearchEnabled,
+		e.selectedDocs,
 		e.systemPromptTemplate,
 	)
 

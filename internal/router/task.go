@@ -3,6 +3,7 @@ package router
 import (
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/types"
@@ -14,18 +15,27 @@ import (
 type AsynqTaskParams struct {
 	dig.In
 
-	Server           *asynq.Server
-	Extracter        interfaces.Extracter
-	KnowledgeService interfaces.KnowledgeService
+	Server               *asynq.Server
+	KnowledgeService     interfaces.KnowledgeService
+	KnowledgeBaseService interfaces.KnowledgeBaseService
+	TagService           interfaces.KnowledgeTagService
+	ChunkExtracter       interfaces.TaskHandler `name:"chunkExtracter"`
+	DataTableSummary     interfaces.TaskHandler `name:"dataTableSummary"`
 }
 
 func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
+	db := 0
+	if dbStr := os.Getenv("REDIS_DB"); dbStr != "" {
+		if parsed, err := strconv.Atoi(dbStr); err == nil {
+			db = parsed
+		}
+	}
 	opt := &asynq.RedisClientOpt{
 		Addr:         os.Getenv("REDIS_ADDR"),
 		Password:     os.Getenv("REDIS_PASSWORD"),
 		ReadTimeout:  100 * time.Millisecond,
 		WriteTimeout: 200 * time.Millisecond,
-		DB:           0,
+		DB:           db,
 	}
 	return opt
 }
@@ -59,7 +69,9 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	// Create a new mux and register all handlers
 	mux := asynq.NewServeMux()
 
-	mux.HandleFunc(types.TypeChunkExtract, params.Extracter.Extract)
+	// Register extract handlers - router will dispatch to appropriate handler
+	mux.HandleFunc(types.TypeChunkExtract, params.ChunkExtracter.Handle)
+	mux.HandleFunc(types.TypeDataTableSummary, params.DataTableSummary.Handle)
 
 	// Register document processing handler
 	mux.HandleFunc(types.TypeDocumentProcess, params.KnowledgeService.ProcessDocument)
@@ -72,6 +84,15 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 
 	// Register summary generation handler
 	mux.HandleFunc(types.TypeSummaryGeneration, params.KnowledgeService.ProcessSummaryGeneration)
+
+	// Register KB clone handler
+	mux.HandleFunc(types.TypeKBClone, params.KnowledgeService.ProcessKBClone)
+
+	// Register index delete handler
+	mux.HandleFunc(types.TypeIndexDelete, params.TagService.ProcessIndexDelete)
+
+	// Register KB delete handler
+	mux.HandleFunc(types.TypeKBDelete, params.KnowledgeBaseService.ProcessKBDelete)
 
 	go func() {
 		// Start the server

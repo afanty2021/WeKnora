@@ -22,7 +22,7 @@
         <img src="https://img.shields.io/badge/License-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" alt="License">
     </a>
     <a href="./CHANGELOG.md">
-        <img alt="バージョン" src="https://img.shields.io/badge/version-0.2.0-2e6cc4?labelColor=d4eaf7">
+        <img alt="バージョン" src="https://img.shields.io/badge/version-0.2.6-2e6cc4?labelColor=d4eaf7">
     </a>
 </p>
 
@@ -325,7 +325,7 @@ WeKnoraは文書をナレッジグラフに変換し、文書内の異なる段�
 
 よくある問題の解決：[よくある問題](./docs/QA.md)
 
-詳細なAPIドキュメントは：[APIドキュメント](./docs/API.md)を参照してください
+詳細なAPIドキュメントは：[APIドキュメント](./docs/api/README.md)を参照してください
 
 ## 🧭 開発ガイド
 

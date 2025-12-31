@@ -287,18 +287,18 @@ func (e *elasticsearchRepository) countBulkErrors(ctx context.Context,
 }
 
 // DeleteByChunkIDList Delete indices by chunk ID list
-func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int) error {
+func (e *elasticsearchRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
 	return e.deleteByFieldList(ctx, "chunk_id.keyword", chunkIDList)
 }
 
 // DeleteBySourceIDList Delete indices by source ID list
-func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int) error {
+func (e *elasticsearchRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error {
 	return e.deleteByFieldList(ctx, "source_id.keyword", sourceIDList)
 }
 
 // DeleteByKnowledgeIDList Delete indices by knowledge ID list
 func (e *elasticsearchRepository) DeleteByKnowledgeIDList(ctx context.Context,
-	knowledgeIDList []string, dimension int,
+	knowledgeIDList []string, dimension int, knowledgeType string,
 ) error {
 	return e.deleteByFieldList(ctx, "knowledge_id.keyword", knowledgeIDList)
 }
@@ -355,14 +355,35 @@ func (e *elasticsearchRepository) deleteByFieldList(ctx context.Context, field s
 
 // getBaseConds Construct base Elasticsearch query conditions based on retrieval parameters
 // It creates MUST conditions for required fields and MUST_NOT conditions for excluded fields
+// KnowledgeBaseIDs and KnowledgeIDs use AND logic (search specific documents within knowledge bases)
 // Returns a JSON string representing the query conditions
 func (e *elasticsearchRepository) getBaseConds(params typesLocal.RetrieveParams) string {
 	// Build MUST conditions (positive filters)
 	must := make([]map[string]interface{}, 0)
+
+	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
+	// - If only KnowledgeBaseIDs: search entire knowledge bases
+	// - If only KnowledgeIDs: search specific documents
+	// - If both: search specific documents within the knowledge bases (AND)
 	if len(params.KnowledgeBaseIDs) > 0 {
 		must = append(must, map[string]interface{}{
 			"terms": map[string]interface{}{
 				"knowledge_base_id.keyword": params.KnowledgeBaseIDs,
+			},
+		})
+	}
+	if len(params.KnowledgeIDs) > 0 {
+		must = append(must, map[string]interface{}{
+			"terms": map[string]interface{}{
+				"knowledge_id.keyword": params.KnowledgeIDs,
+			},
+		})
+	}
+	// Filter by tag IDs if specified
+	if len(params.TagIDs) > 0 {
+		must = append(must, map[string]interface{}{
+			"terms": map[string]interface{}{
+				"tag_id.keyword": params.TagIDs,
 			},
 		})
 	}
@@ -816,6 +837,7 @@ func (e *elasticsearchRepository) CopyIndices(ctx context.Context,
 	sourceToTargetChunkIDMap map[string]string,
 	targetKnowledgeBaseID string,
 	dimension int,
+	knowledgeType string,
 ) error {
 	log := logger.GetLogger(ctx)
 	log.Infof(
@@ -1035,9 +1057,26 @@ func (e *elasticsearchRepository) processSingleHit(ctx context.Context,
 
 	// Extract basic content
 	content, _ := sourceObj["content"].(string)
+	originalSourceID, _ := sourceObj["source_id"].(string)
 	sourceType := 0
 	if st, ok := sourceObj["source_type"].(float64); ok {
 		sourceType = int(st)
+	}
+
+	// Handle SourceID transformation for generated questions
+	// Generated questions have SourceID format: {chunkID}-{questionID}
+	// Regular chunks have SourceID == ChunkID
+	var targetSourceID string
+	if originalSourceID == sourceChunkID {
+		// Regular chunk, use targetChunkID as SourceID
+		targetSourceID = targetChunkID
+	} else if strings.HasPrefix(originalSourceID, sourceChunkID+"-") {
+		// This is a generated question, preserve the questionID part
+		questionID := strings.TrimPrefix(originalSourceID, sourceChunkID+"-")
+		targetSourceID = fmt.Sprintf("%s-%s", targetChunkID, questionID)
+	} else {
+		// For other complex scenarios, generate new unique SourceID
+		targetSourceID = uuid.New().String()
 	}
 
 	// Extract embedding vector (if exists)
@@ -1056,7 +1095,7 @@ func (e *elasticsearchRepository) processSingleHit(ctx context.Context,
 	// Create IndexInfo object
 	indexInfo := &typesLocal.IndexInfo{
 		ChunkID:         targetChunkID,
-		SourceID:        targetChunkID,
+		SourceID:        targetSourceID,
 		KnowledgeID:     targetKnowledgeID,
 		KnowledgeBaseID: targetKnowledgeBaseID,
 		Content:         content,
@@ -1194,5 +1233,66 @@ func (e *elasticsearchRepository) BatchUpdateChunkEnabledStatus(
 	}
 
 	log.Infof("[ElasticsearchV7] Successfully batch updated chunk enabled status")
+	return nil
+}
+
+// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+func (e *elasticsearchRepository) BatchUpdateChunkTagID(
+	ctx context.Context,
+	chunkTagMap map[string]string,
+) error {
+	log := logger.GetLogger(ctx)
+	if len(chunkTagMap) == 0 {
+		log.Warnf("[ElasticsearchV7] Chunk tag map is empty, skipping update")
+		return nil
+	}
+
+	log.Infof("[ElasticsearchV7] Batch updating chunk tag ID, count: %d", len(chunkTagMap))
+
+	// Group chunks by tag ID for batch updates
+	tagGroups := make(map[string][]string)
+	for chunkID, tagID := range chunkTagMap {
+		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
+	}
+
+	// Batch update chunks for each tag ID using update_by_query
+	for tagID, chunkIDs := range tagGroups {
+		query := map[string]interface{}{
+			"query": map[string]interface{}{
+				"terms": map[string]interface{}{
+					"chunk_id.keyword": chunkIDs,
+				},
+			},
+			"script": map[string]interface{}{
+				"source": "ctx._source.tag_id = params.tag_id",
+				"lang":   "painless",
+				"params": map[string]interface{}{
+					"tag_id": tagID,
+				},
+			},
+		}
+		queryJSON, _ := json.Marshal(query)
+		res, err := esapi.UpdateByQueryRequest{
+			Index: []string{e.index},
+			Body:  strings.NewReader(string(queryJSON)),
+		}.Do(ctx, e.client)
+		if err != nil {
+			log.Errorf("[ElasticsearchV7] Failed to update chunks with tag_id %s: %v", tagID, err)
+			return err
+		}
+		defer res.Body.Close()
+		if res.IsError() {
+			var e map[string]interface{}
+			if err := json.NewDecoder(res.Body).Decode(&e); err != nil {
+				log.Errorf("[ElasticsearchV7] Error parsing the response body: %v", err)
+			} else {
+				log.Errorf("[ElasticsearchV7] Error updating chunks with tag_id: %v", e["error"])
+			}
+			return fmt.Errorf("elasticsearch update_by_query failed with status: %d", res.StatusCode)
+		}
+		log.Infof("[ElasticsearchV7] Updated %d chunks to tag_id=%s", len(chunkIDs), tagID)
+	}
+
+	log.Infof("[ElasticsearchV7] Successfully batch updated chunk tag ID")
 	return nil
 }

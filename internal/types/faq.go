@@ -180,6 +180,7 @@ type FAQEntry struct {
 	KnowledgeID       string         `json:"knowledge_id"`
 	KnowledgeBaseID   string         `json:"knowledge_base_id"`
 	TagID             string         `json:"tag_id"`
+	TagName           string         `json:"tag_name"`
 	IsEnabled         bool           `json:"is_enabled"`
 	IsRecommended     bool           `json:"is_recommended"`
 	StandardQuestion  string         `json:"standard_question"`
@@ -222,10 +223,15 @@ type FAQBatchUpsertPayload struct {
 
 // FAQSearchRequest FAQ检索请求参数
 type FAQSearchRequest struct {
-	QueryText       string  `json:"query_text"       binding:"required"`
-	VectorThreshold float64 `json:"vector_threshold"`
-	MatchCount      int     `json:"match_count"`
+	QueryText            string   `json:"query_text"             binding:"required"`
+	VectorThreshold      float64  `json:"vector_threshold"`
+	MatchCount           int      `json:"match_count"`
+	FirstPriorityTagIDs  []string `json:"first_priority_tag_ids"`  // 第一优先级标签ID列表，限定命中范围，优先级最高
+	SecondPriorityTagIDs []string `json:"second_priority_tag_ids"` // 第二优先级标签ID列表，限定命中范围，优先级低于第一优先级
 }
+
+// UntaggedTagID is the special tag ID representing uncategorized entries
+const UntaggedTagID = "__untagged__"
 
 // FAQEntryFieldsUpdate 单个FAQ条目的字段更新
 type FAQEntryFieldsUpdate struct {
@@ -242,8 +248,10 @@ type FAQEntryFieldsUpdate struct {
 type FAQEntryFieldsBatchUpdate struct {
 	// ByID 按条目ID更新，key为条目ID
 	ByID map[string]FAQEntryFieldsUpdate `json:"by_id,omitempty"`
-	// ByTag 按Tag批量更新，key为TagID（空字符串表示未分类）
+	// ByTag 按Tag批量更新，key为TagID（__untagged__表示未分类）
 	ByTag map[string]FAQEntryFieldsUpdate `json:"by_tag,omitempty"`
+	// ExcludeIDs 在ByTag操作中需要排除的ID列表
+	ExcludeIDs []string `json:"exclude_ids,omitempty"`
 }
 
 // FAQImportTaskStatus 导入任务状态
@@ -260,7 +268,23 @@ const (
 	FAQImportStatusFailed FAQImportTaskStatus = "failed"
 )
 
+// FAQImportProgress represents the progress of an FAQ import task stored in Redis
+type FAQImportProgress struct {
+	TaskID      string              `json:"task_id"`       // UUID for the import task
+	KBID        string              `json:"kb_id"`         // Knowledge Base ID
+	KnowledgeID string              `json:"knowledge_id"`  // FAQ Knowledge ID
+	Status      FAQImportTaskStatus `json:"status"`        // Task status
+	Progress    int                 `json:"progress"`      // 0-100 percentage
+	Total       int                 `json:"total"`         // Total entries to import
+	Processed   int                 `json:"processed"`     // Entries processed so far
+	Message     string              `json:"message"`       // Status message
+	Error       string              `json:"error"`         // Error message if failed
+	CreatedAt   int64               `json:"created_at"`    // Task creation timestamp
+	UpdatedAt   int64               `json:"updated_at"`    // Last update timestamp
+}
+
 // FAQImportMetadata 存储在Knowledge.Metadata中的FAQ导入任务信息
+// Deprecated: Use FAQImportProgress with Redis storage instead
 type FAQImportMetadata struct {
 	ImportProgress  int `json:"import_progress"` // 0-100
 	ImportTotal     int `json:"import_total"`

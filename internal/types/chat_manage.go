@@ -8,12 +8,15 @@ type ChatManage struct {
 	RewriteQuery string     `json:"rewrite_query,omitempty"` // Query after rewriting for better retrieval
 	History      []*History `json:"history,omitempty"`       // Chat history for context
 
-	KnowledgeBaseID  string   `json:"knowledge_base_id"`  // ID of the knowledge base to search against (deprecated, use KnowledgeBaseIDs)
-	KnowledgeBaseIDs []string `json:"knowledge_base_ids"` // IDs of knowledge bases to search (multi-KB support)
-	VectorThreshold  float64  `json:"vector_threshold"`   // Minimum score threshold for vector search results
-	KeywordThreshold float64  `json:"keyword_threshold"`  // Minimum score threshold for keyword search results
-	EmbeddingTopK    int      `json:"embedding_top_k"`    // Number of top results to retrieve from embedding search
-	VectorDatabase   string   `json:"vector_database"`    // Vector database type/name to use
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids"`      // IDs of knowledge bases to search (multi-KB support)
+	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"` // IDs of specific files to search (optional)
+	// SearchTargets is the pre-computed unified search targets
+	// Computed once at request entry point, used throughout the pipeline
+	SearchTargets    SearchTargets `json:"-"`
+	VectorThreshold  float64       `json:"vector_threshold"`  // Minimum score threshold for vector search results
+	KeywordThreshold float64       `json:"keyword_threshold"` // Minimum score threshold for keyword search results
+	EmbeddingTopK    int           `json:"embedding_top_k"`   // Number of top results to retrieve from embedding search
+	VectorDatabase   string        `json:"vector_database"`   // Vector database type/name to use
 
 	RerankModelID   string  `json:"rerank_model_id"`  // Model ID for reranking search results
 	RerankTopK      int     `json:"rerank_top_k"`     // Number of top results after reranking
@@ -33,13 +36,15 @@ type ChatManage struct {
 	RewritePromptUser    string `json:"rewrite_prompt_user"`    // Custom user prompt for rewrite stage
 
 	// Internal fields for pipeline data processing
-	SearchResult []*SearchResult `json:"-"` // Results from search phase
-	RerankResult []*SearchResult `json:"-"` // Results after reranking
-	MergeResult  []*SearchResult `json:"-"` // Final merged results after all processing
-	Entity       []string        `json:"-"` // List of identified entities
-	GraphResult  *GraphData      `json:"-"` // Graph data from search phase
-	UserContent  string          `json:"-"` // Processed user content
-	ChatResponse *ChatResponse   `json:"-"` // Final response from chat model
+	SearchResult    []*SearchResult   `json:"-"` // Results from search phase
+	RerankResult    []*SearchResult   `json:"-"` // Results after reranking
+	MergeResult     []*SearchResult   `json:"-"` // Final merged results after all processing
+	Entity          []string          `json:"-"` // List of identified entities
+	EntityKBIDs     []string          `json:"-"` // Knowledge base IDs with ExtractConfig enabled
+	EntityKnowledge map[string]string `json:"-"` // KnowledgeID -> KnowledgeBaseID mapping for graph-enabled files
+	GraphResult     *GraphData        `json:"-"` // Graph data from search phase
+	UserContent     string            `json:"-"` // Processed user content
+	ChatResponse    *ChatResponse     `json:"-"` // Final response from chat model
 
 	// Event system for streaming responses
 	EventBus  EventBusInterface `json:"-"` // EventBus for emitting streaming events
@@ -48,6 +53,11 @@ type ChatManage struct {
 	// Web search configuration (internal use)
 	TenantID         uint64 `json:"-"` // Tenant ID for retrieving web search config
 	WebSearchEnabled bool   `json:"-"` // Whether web search is enabled for this request
+
+	// FAQ Strategy Settings
+	FAQPriorityEnabled       bool    `json:"-"` // Whether FAQ priority strategy is enabled
+	FAQDirectAnswerThreshold float64 `json:"-"` // Threshold for direct FAQ answer (similarity > this value)
+	FAQScoreBoost            float64 `json:"-"` // Score multiplier for FAQ results
 }
 
 // Clone creates a deep copy of the ChatManage object
@@ -56,12 +66,31 @@ func (c *ChatManage) Clone() *ChatManage {
 	knowledgeBaseIDs := make([]string, len(c.KnowledgeBaseIDs))
 	copy(knowledgeBaseIDs, c.KnowledgeBaseIDs)
 
+	// Deep copy knowledge IDs slice
+	knowledgeIDs := make([]string, len(c.KnowledgeIDs))
+	copy(knowledgeIDs, c.KnowledgeIDs)
+
+	// Deep copy search targets slice
+	searchTargets := make(SearchTargets, len(c.SearchTargets))
+	for i, t := range c.SearchTargets {
+		if t != nil {
+			kidsCopy := make([]string, len(t.KnowledgeIDs))
+			copy(kidsCopy, t.KnowledgeIDs)
+			searchTargets[i] = &SearchTarget{
+				Type:            t.Type,
+				KnowledgeBaseID: t.KnowledgeBaseID,
+				KnowledgeIDs:    kidsCopy,
+			}
+		}
+	}
+
 	return &ChatManage{
 		Query:            c.Query,
 		RewriteQuery:     c.RewriteQuery,
 		SessionID:        c.SessionID,
-		KnowledgeBaseID:  c.KnowledgeBaseID,
 		KnowledgeBaseIDs: knowledgeBaseIDs,
+		KnowledgeIDs:     knowledgeIDs,
+		SearchTargets:    searchTargets,
 		VectorThreshold:  c.VectorThreshold,
 		KeywordThreshold: c.KeywordThreshold,
 		EmbeddingTopK:    c.EmbeddingTopK,
@@ -92,6 +121,11 @@ func (c *ChatManage) Clone() *ChatManage {
 		RewritePromptUser:    c.RewritePromptUser,
 		EnableRewrite:        c.EnableRewrite,
 		EnableQueryExpansion: c.EnableQueryExpansion,
+		TenantID:             c.TenantID,
+		// FAQ Strategy Settings
+		FAQPriorityEnabled:       c.FAQPriorityEnabled,
+		FAQDirectAnswerThreshold: c.FAQDirectAnswerThreshold,
+		FAQScoreBoost:            c.FAQScoreBoost,
 	}
 }
 
@@ -99,12 +133,14 @@ func (c *ChatManage) Clone() *ChatManage {
 type EventType string
 
 const (
+	LOAD_HISTORY           EventType = "load_history"           // Load conversation history without rewriting
 	REWRITE_QUERY          EventType = "rewrite_query"          // Query rewriting for better retrieval
 	CHUNK_SEARCH           EventType = "chunk_search"           // Search for relevant chunks
 	CHUNK_SEARCH_PARALLEL  EventType = "chunk_search_parallel"  // Parallel search: chunks + entities
 	ENTITY_SEARCH          EventType = "entity_search"          // Search for relevant entities
 	CHUNK_RERANK           EventType = "chunk_rerank"           // Rerank search results
 	CHUNK_MERGE            EventType = "chunk_merge"            // Merge similar chunks
+	DATA_ANALYSIS          EventType = "data_analysis"          // Data analysis for CSV/Excel files
 	INTO_CHAT_MESSAGE      EventType = "into_chat_message"      // Convert chunks into chat messages
 	CHAT_COMPLETION        EventType = "chat_completion"        // Generate chat completion
 	CHAT_COMPLETION_STREAM EventType = "chat_completion_stream" // Stream chat completion
@@ -117,7 +153,12 @@ var Pipline = map[string][]EventType{
 	"chat": { // Simple chat without retrieval
 		CHAT_COMPLETION,
 	},
-	"chat_stream": { // Streaming chat without retrieval
+	"chat_stream": { // Streaming chat without retrieval (no history)
+		CHAT_COMPLETION_STREAM,
+		STREAM_FILTER,
+	},
+	"chat_history_stream": { // Streaming chat with conversation history
+		LOAD_HISTORY,
 		CHAT_COMPLETION_STREAM,
 		STREAM_FILTER,
 	},
@@ -134,6 +175,7 @@ var Pipline = map[string][]EventType{
 		CHUNK_RERANK,
 		CHUNK_MERGE,
 		FILTER_TOP_K,
+		DATA_ANALYSIS,
 		INTO_CHAT_MESSAGE,
 		CHAT_COMPLETION_STREAM,
 		STREAM_FILTER,

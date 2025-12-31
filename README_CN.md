@@ -22,7 +22,7 @@
         <img src="https://img.shields.io/badge/License-MIT-ffffff?labelColor=d4eaf7&color=2e6cc4" alt="License">
     </a>
     <a href="./CHANGELOG.md">
-        <img alt="版本" src="https://img.shields.io/badge/version-0.2.0-2e6cc4?labelColor=d4eaf7">
+        <img alt="版本" src="https://img.shields.io/badge/version-0.2.6-2e6cc4?labelColor=d4eaf7">
     </a>
 </p>
 
@@ -325,7 +325,7 @@ WeKnora 支持将文档转化为知识图谱，展示文档中不同段落之间
 
 常见问题排查：[常见问题排查](./docs/QA.md)
 
-详细接口说明请参考：[API 文档](./docs/API.md)
+详细接口说明请参考：[API 文档](./docs/api/README.md)
 
 ## 🧭 开发指南
 

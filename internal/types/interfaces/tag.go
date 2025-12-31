@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Tencent/WeKnora/internal/types"
+	"github.com/hibiken/asynq"
 )
 
 // KnowledgeTagService defines operations on knowledge base scoped tags.
@@ -15,9 +16,13 @@ type KnowledgeTagService interface {
 	// UpdateTag updates tag basic information.
 	UpdateTag(ctx context.Context, id string, name *string, color *string, sortOrder *int) (*types.KnowledgeTag, error)
 	// DeleteTag deletes a tag.
-	DeleteTag(ctx context.Context, id string, force bool) error
+	// When contentOnly=true, only deletes the content under the tag but keeps the tag itself.
+	// excludeIDs: IDs of chunks to exclude from deletion (only valid when deleting chunks)
+	DeleteTag(ctx context.Context, id string, force bool, contentOnly bool, excludeIDs []string) error
 	// FindOrCreateTagByName finds a tag by name or creates it if not exists.
 	FindOrCreateTagByName(ctx context.Context, kbID string, name string) (*types.KnowledgeTag, error)
+	// ProcessIndexDelete handles async index deletion task
+	ProcessIndexDelete(ctx context.Context, t *asynq.Task) error
 }
 
 // KnowledgeTagRepository defines persistence operations for tags.
@@ -25,6 +30,8 @@ type KnowledgeTagRepository interface {
 	Create(ctx context.Context, tag *types.KnowledgeTag) error
 	Update(ctx context.Context, tag *types.KnowledgeTag) error
 	GetByID(ctx context.Context, tenantID uint64, id string) (*types.KnowledgeTag, error)
+	// GetByIDs retrieves multiple tags by their IDs in a single query.
+	GetByIDs(ctx context.Context, tenantID uint64, ids []string) ([]*types.KnowledgeTag, error)
 	GetByName(ctx context.Context, tenantID uint64, kbID string, name string) (*types.KnowledgeTag, error)
 	ListByKB(
 		ctx context.Context,

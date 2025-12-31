@@ -51,19 +51,32 @@ type GenerateTitleRequest struct {
 	Messages []types.Message `json:"messages" binding:"required"` // Messages to use as context for title generation
 }
 
+// MentionedItemRequest represents a mentioned item in the request
+type MentionedItemRequest struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`    // "kb" for knowledge base, "file" for file
+	KBType string `json:"kb_type"` // "document" or "faq" (only for kb type)
+}
+
 // CreateKnowledgeQARequest defines the request structure for knowledge QA
 type CreateKnowledgeQARequest struct {
-	Query            string   `json:"query"              binding:"required"` // Query text for knowledge base search
-	KnowledgeBaseIDs []string `json:"knowledge_base_ids"`                    // Selected knowledge base ID for this request
-	AgentEnabled     bool     `json:"agent_enabled"`                         // Whether agent mode is enabled for this request
-	WebSearchEnabled bool     `json:"web_search_enabled"`                    // Whether web search is enabled for this request
-	SummaryModelID   string   `json:"summary_model_id"`                      // Optional summary model ID for this request (overrides session default)
+	Query            string                 `json:"query"              binding:"required"` // Query text for knowledge base search
+	KnowledgeBaseIDs []string               `json:"knowledge_base_ids"`                    // Selected knowledge base ID for this request
+	KnowledgeIds     []string               `json:"knowledge_ids"`                         // Selected knowledge ID for this request
+	AgentEnabled     bool                   `json:"agent_enabled"`                         // Whether agent mode is enabled for this request
+	AgentID          string                 `json:"agent_id"`                              // Selected custom agent ID for this request
+	WebSearchEnabled bool                   `json:"web_search_enabled"`                    // Whether web search is enabled for this request
+	SummaryModelID   string                 `json:"summary_model_id"`                      // Optional summary model ID for this request (overrides session default)
+	MentionedItems   []MentionedItemRequest `json:"mentioned_items"`                       // @mentioned knowledge bases and files
 }
 
 // SearchKnowledgeRequest defines the request structure for searching knowledge without LLM summarization
 type SearchKnowledgeRequest struct {
-	Query           string `json:"query"             binding:"required"` // Query text to search for
-	KnowledgeBaseID string `json:"knowledge_base_id" binding:"required"` // ID of the knowledge base to search
+	Query            string   `json:"query"              binding:"required"` // Query text to search for
+	KnowledgeBaseID  string   `json:"knowledge_base_id"`                     // Single knowledge base ID (for backward compatibility)
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids"`                    // IDs of knowledge bases to search (multi-KB support)
+	KnowledgeIDs     []string `json:"knowledge_ids"`                         // IDs of specific knowledge (files) to search
 }
 
 // StopSessionRequest represents the stop session request

@@ -74,18 +74,24 @@ type KnowledgeService interface {
 	UpdateImageInfo(ctx context.Context, knowledgeID string, chunkID string, imageInfo string) error
 	// ListFAQEntries lists FAQ entries under a FAQ knowledge base.
 	// When tagID is non-empty, results are filtered by tag_id on FAQ chunks.
+	// searchField: specifies which field to search in ("standard_question", "similar_questions", "answers", "" for all)
+	// sortOrder: "asc" for time ascending (updated_at ASC), default is time descending (updated_at DESC)
 	ListFAQEntries(
 		ctx context.Context,
 		kbID string,
 		page *types.Pagination,
 		tagID string,
 		keyword string,
+		searchField string,
+		sortOrder string,
 	) (*types.PageResult, error)
 	// UpsertFAQEntries imports or appends FAQ entries asynchronously.
 	// Returns task ID (Knowledge ID) for tracking import progress.
 	UpsertFAQEntries(ctx context.Context, kbID string, payload *types.FAQBatchUpsertPayload) (string, error)
 	// CreateFAQEntry creates a single FAQ entry synchronously.
 	CreateFAQEntry(ctx context.Context, kbID string, payload *types.FAQEntryPayload) (*types.FAQEntry, error)
+	// GetFAQEntry retrieves a single FAQ entry by ID.
+	GetFAQEntry(ctx context.Context, kbID string, entryID string) (*types.FAQEntry, error)
 	// UpdateFAQEntry updates a single FAQ entry.
 	UpdateFAQEntry(ctx context.Context, kbID string, entryID string, payload *types.FAQEntryPayload) error
 	// UpdateFAQEntryFieldsBatch updates multiple fields for FAQ entries in batch.
@@ -95,6 +101,8 @@ type KnowledgeService interface {
 	DeleteFAQEntries(ctx context.Context, kbID string, entryIDs []string) error
 	// SearchFAQEntries searches FAQ entries using hybrid search.
 	SearchFAQEntries(ctx context.Context, kbID string, req *types.FAQSearchRequest) ([]*types.FAQEntry, error)
+	// ExportFAQEntries exports all FAQ entries for a knowledge base as CSV data.
+	ExportFAQEntries(ctx context.Context, kbID string) ([]byte, error)
 	// UpdateKnowledgeTagBatch updates tag for document knowledge items in batch.
 	UpdateKnowledgeTagBatch(ctx context.Context, updates map[string]*string) error
 	// UpdateFAQEntryTagBatch updates tag for FAQ entries in batch.
@@ -109,6 +117,16 @@ type KnowledgeService interface {
 	ProcessQuestionGeneration(ctx context.Context, t *asynq.Task) error
 	// ProcessSummaryGeneration handles Asynq summary generation tasks
 	ProcessSummaryGeneration(ctx context.Context, t *asynq.Task) error
+	// ProcessKBClone handles Asynq knowledge base clone tasks
+	ProcessKBClone(ctx context.Context, t *asynq.Task) error
+	// GetKBCloneProgress retrieves the progress of a knowledge base clone task
+	GetKBCloneProgress(ctx context.Context, taskID string) (*types.KBCloneProgress, error)
+	// SaveKBCloneProgress saves the progress of a knowledge base clone task
+	SaveKBCloneProgress(ctx context.Context, progress *types.KBCloneProgress) error
+	// GetFAQImportProgress retrieves the progress of an FAQ import task
+	GetFAQImportProgress(ctx context.Context, taskID string) (*types.FAQImportProgress, error)
+	// SearchKnowledge searches knowledge items by keyword across the tenant.
+	SearchKnowledge(ctx context.Context, keyword string, offset, limit int) ([]*types.Knowledge, bool, error)
 }
 
 // KnowledgeRepository defines the interface for knowledge repositories.
@@ -146,4 +164,6 @@ type KnowledgeRepository interface {
 	CountKnowledgeByKnowledgeBaseID(ctx context.Context, tenantID uint64, kbID string) (int64, error)
 	// CountKnowledgeByStatus counts the number of knowledge items with the specified parse status.
 	CountKnowledgeByStatus(ctx context.Context, tenantID uint64, kbID string, parseStatuses []string) (int64, error)
+	// SearchKnowledge searches knowledge items by keyword across the tenant.
+	SearchKnowledge(ctx context.Context, tenantID uint64, keyword string, offset, limit int) ([]*types.Knowledge, bool, error)
 }

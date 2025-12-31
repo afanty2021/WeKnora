@@ -39,17 +39,13 @@ const uiStore = useUIStore();
 const { t } = useI18n();
 const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
 
-const sendMsg = (value: string) => {
-    createNewSession(value);
+const sendMsg = (value: string, modelId: string, mentionedItems: any[]) => {
+    createNewSession(value, mentionedItems);
 }
 
-async function createNewSession(value: string) {
-    const selectedKbs = settingsStore.settings.selectedKnowledgeBases;
-    
-    if (!selectedKbs || selectedKbs.length === 0) {
-        MessagePlugin.warning(t('createChat.messages.selectKnowledgeBase'));
-        return;
-    }
+async function createNewSession(value: string, mentionedItems: any[] = []) {
+    const selectedKbs = settingsStore.settings.selectedKnowledgeBases || [];
+    const selectedFiles = settingsStore.settings.selectedFiles || [];
 
     // 构建 session 数据，包含 Agent 配置
     const sessionData: any = {};
@@ -60,13 +56,14 @@ async function createNewSession(value: string) {
         max_iterations: settingsStore.agentConfig.maxIterations,
         temperature: settingsStore.agentConfig.temperature,
         knowledge_bases: selectedKbs,  // 所有选中的知识库
+        knowledge_ids: selectedFiles,  // 所有选中的普通知识/文件
         allowed_tools: settingsStore.agentConfig.allowedTools
     };
 
     try {
         const res = await createSessions(sessionData);
         if (res.data && res.data.id) {
-            await navigateToSession(res.data.id, value);
+            await navigateToSession(res.data.id, value, mentionedItems);
         } else {
             console.error('[createChat] Failed to create session');
             MessagePlugin.error(t('createChat.messages.createFailed'));
@@ -77,7 +74,7 @@ async function createNewSession(value: string) {
     }
 }
 
-const navigateToSession = async (sessionId: string, value: string) => {
+const navigateToSession = async (sessionId: string, value: string, mentionedItems: any[]) => {
     const now = new Date().toISOString();
     let obj = { 
         title: t('createChat.newSessionTitle'), 
@@ -90,7 +87,7 @@ const navigateToSession = async (sessionId: string, value: string) => {
     };
     usemenuStore.updataMenuChildren(obj);
     usemenuStore.changeIsFirstSession(true);
-    usemenuStore.changeFirstQuery(value);
+    usemenuStore.changeFirstQuery(value, mentionedItems);
     router.push(`/platform/chat/${sessionId}`);
 }
 

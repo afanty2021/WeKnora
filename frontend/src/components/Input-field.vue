@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { ref, defineEmits, onMounted, onUnmounted, defineProps, computed, watch, nextTick, h } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick, h } from "vue";
 import { useRoute, useRouter } from 'vue-router';
 import { onBeforeRouteUpdate } from 'vue-router';
 import { MessagePlugin } from "tdesign-vue-next";
 import { useSettingsStore } from '@/stores/settings';
 import { useUIStore } from '@/stores/ui';
-import { listKnowledgeBases } from '@/api/knowledge-base';
+import { listKnowledgeBases, searchKnowledge, batchQueryKnowledge } from '@/api/knowledge-base';
 import { stopSession } from '@/api/chat';
 import KnowledgeBaseSelector from './KnowledgeBaseSelector.vue';
+import MentionSelector from './MentionSelector.vue';
+import AgentSelector from './AgentSelector.vue';
+import { getCaretCoordinates } from '@/utils/caret';
 import { listModels, type ModelConfig } from '@/api/model';
+import { listAgents, type CustomAgent, BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from '@/api/agent';
 import { getTenantWebSearchConfig } from '@/api/web-search';
 import { getConversationConfig, updateConversationConfig, type ConversationConfig } from '@/api/system';
 import { useI18n } from 'vue-i18n';
@@ -17,12 +21,133 @@ const route = useRoute();
 const router = useRouter();
 const settingsStore = useSettingsStore();
 const uiStore = useUIStore();
+const { t } = useI18n();
+
 let query = ref("");
 const showKbSelector = ref(false);
 const atButtonRef = ref<HTMLElement>();
 const showAgentModeSelector = ref(false);
 const agentModeButtonRef = ref<HTMLElement>();
 const agentModeDropdownStyle = ref<Record<string, string>>({});
+
+// 智能体相关状态
+const agents = ref<CustomAgent[]>([]);
+const selectedAgentId = computed({
+  get: () => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
+  set: (val: string) => settingsStore.selectAgent(val)
+});
+const selectedAgent = computed(() => {
+  return agents.value.find(a => a.id === selectedAgentId.value) || {
+    id: BUILTIN_QUICK_ANSWER_ID,
+    name: t('input.normalMode'),
+    is_builtin: true,
+    config: { agent_mode: 'quick-answer' as const }
+  } as CustomAgent;
+});
+
+// 判断是否为自定义智能体（非内置）
+const isCustomAgent = computed(() => {
+  const agent = selectedAgent.value;
+  return agent && !agent.is_builtin;
+});
+
+// 判断是否有智能体配置（包括内置智能体）
+const hasAgentConfig = computed(() => {
+  const agent = selectedAgent.value;
+  // 内置智能体需要从 agents 列表中获取实际配置
+  if (agent?.is_builtin) {
+    const builtinAgent = agents.value.find(a => a.id === agent.id);
+    return !!builtinAgent?.config;
+  }
+  return !!agent?.config;
+});
+
+// 获取当前智能体的实际配置（内置智能体从 agents 列表获取）
+const currentAgentConfig = computed(() => {
+  const agent = selectedAgent.value;
+  if (agent?.is_builtin) {
+    const builtinAgent = agents.value.find(a => a.id === agent.id);
+    return builtinAgent?.config || {};
+  }
+  return agent?.config || {};
+});
+
+// 智能体预配置的知识库 IDs
+const agentKnowledgeBases = computed(() => {
+  if (!hasAgentConfig.value) return [];
+  return currentAgentConfig.value?.knowledge_bases || [];
+});
+
+// 当智能体改变时，将智能体配置的知识库同步到 store
+// 这样用户可以移除这些知识库
+watch([selectedAgentId, agentKnowledgeBases], ([newAgentId, newAgentKbs], [oldAgentId]) => {
+  if (newAgentId !== oldAgentId && newAgentKbs && newAgentKbs.length > 0) {
+    // 智能体切换了，将新智能体配置的知识库添加到 store
+    const currentSelected = settingsStore.settings.selectedKnowledgeBases || [];
+    const toAdd = newAgentKbs.filter((id: string) => !currentSelected.includes(id));
+    if (toAdd.length > 0) {
+      settingsStore.selectKnowledgeBases([...currentSelected, ...toAdd]);
+    }
+  }
+}, { immediate: true });
+
+// 智能体的知识库选择模式
+const agentKBSelectionMode = computed(() => {
+  if (!hasAgentConfig.value) return null; // null 表示不受智能体控制
+  return currentAgentConfig.value?.kb_selection_mode || 'all';
+});
+
+// 智能体是否启用了网络搜索
+const agentWebSearchEnabled = computed(() => {
+  if (!hasAgentConfig.value) return null; // null 表示不受智能体控制
+  return currentAgentConfig.value?.web_search_enabled ?? true;
+});
+
+// 网络搜索是否被智能体禁用（只读状态）- 只有明确设置为 false 时才禁用
+const isWebSearchDisabledByAgent = computed(() => {
+  return hasAgentConfig.value && agentWebSearchEnabled.value === false;
+});
+
+// 知识库选择是否被智能体锁定
+// 1. 如果智能体配置了 kb_selection_mode = 'none' → 完全禁用知识库
+// 其他情况用户都可以在允许的范围内通过 @ 选择知识库
+const isKnowledgeBaseLockedByAgent = computed(() => {
+  if (!hasAgentConfig.value) return false;
+  // 只有禁用了知识库才锁定
+  return agentKBSelectionMode.value === 'none';
+});
+
+// 知识库是否被智能体完全禁用（kb_selection_mode = 'none'）
+const isKnowledgeBaseDisabledByAgent = computed(() => {
+  if (!hasAgentConfig.value) return false;
+  return agentKBSelectionMode.value === 'none';
+});
+
+// 智能体配置的模型 ID
+const agentModelId = computed(() => {
+  if (!hasAgentConfig.value) return null;
+  return currentAgentConfig.value?.model_id || null;
+});
+
+// 模型选择是否被智能体锁定 - 已移除锁定逻辑，允许用户自由切换模型
+const isModelLockedByAgent = computed(() => {
+  return false;
+});
+
+// Mention related state
+const showMention = ref(false);
+const mentionQuery = ref("");
+const mentionItems = ref<Array<{ id: string; name: string; type: 'kb' | 'file'; kbType?: 'document' | 'faq'; count?: number; kbName?: string }>>([]);
+const mentionActiveIndex = ref(0);
+const mentionStyle = ref<Record<string, string>>({});
+const textareaRef = ref<any>(null); // Ref to t-textarea component
+const mentionStartPos = ref(0);
+const isComposing = ref(false);
+const isMentionTriggeredByButton = ref(false);
+const mentionHasMore = ref(false);
+const mentionLoading = ref(false);
+const mentionOffset = ref(0);
+const MENTION_PAGE_SIZE = 20;
 
 const props = defineProps({
   isReplying: {
@@ -42,28 +167,108 @@ const props = defineProps({
 const isAgentEnabled = computed(() => settingsStore.isAgentEnabled);
 const isWebSearchEnabled = computed(() => settingsStore.isWebSearchEnabled);
 const selectedKbIds = computed(() => settingsStore.settings.selectedKnowledgeBases || []);
+const selectedFileIds = computed(() => settingsStore.settings.selectedFiles || []);
 const isWebSearchConfigured = ref(false);
 
 // 获取已选择的知识库信息
-const knowledgeBases = ref<Array<{ id: string; name: string }>>([]);
+const knowledgeBases = ref<Array<{ id: string; name: string; type?: 'document' | 'faq'; knowledge_count?: number; chunk_count?: number }>>([]);
+const fileList = ref<Array<{ id: string; name: string }>>([]);
+
 const selectedKbs = computed(() => {
   return knowledgeBases.value.filter(kb => selectedKbIds.value.includes(kb.id));
 });
 
+const selectedFiles = computed(() => {
+  // If we have file details in fileList, use them.
+  // Otherwise we might show ID or Loading...
+  return selectedFileIds.value.map((id: string) => {
+    const found = fileList.value.find(f => f.id === id);
+    return found || { id, name: 'Loading...' };
+  });
+});
+
+  // 合并所有选中项（用于输入框内显示）
+  // 现在智能体配置的知识库也在 store 中，统一从 selectedKbs 获取
+  const allSelectedItems = computed(() => {
+    // 获取智能体预配置的知识库 IDs（用于标记和排序）
+    const agentKbIds = agentKnowledgeBases.value;
+    
+    // 所有选中的知识库，标记是否为智能体配置
+    const allKbs = selectedKbs.value.map(kb => ({ 
+      ...kb, 
+      type: 'kb' as const,
+      kbType: kb.type,
+      isAgentConfigured: agentKbIds.includes(kb.id)
+    }));
+    
+    // 用户选择的文件
+    const files = selectedFiles.value.map((f: { id: string; name: string }) => ({ 
+      ...f, 
+      type: 'file' as const,
+      isAgentConfigured: false
+    }));
+    
+    // 智能体配置的放在前面
+    const agentConfiguredKbs = allKbs.filter(kb => kb.isAgentConfigured);
+    const userSelectedKbs = allKbs.filter(kb => !kb.isAgentConfigured);
+    
+    return [...agentConfiguredKbs, ...userSelectedKbs, ...files];
+  });
+
+// 移除选中项（智能体配置的项也可以移除）
+const removeSelectedItem = (item: { id: string; type: 'kb' | 'file'; isAgentConfigured?: boolean }) => {
+  if (item.type === 'kb') {
+    settingsStore.removeKnowledgeBase(item.id);
+  } else {
+    settingsStore.removeFile(item.id);
+  }
+};
+
 // 模型相关状态
 const availableModels = ref<ModelConfig[]>([]);
-const selectedModelId = ref<string>('');
+// 使用 computed 从 store 读取，并通过 setter 同步回 store
+const selectedModelId = computed({
+  get: () => settingsStore.conversationModels.selectedChatModelId || '',
+  set: (val: string) => settingsStore.updateConversationModels({ selectedChatModelId: val })
+});
 const conversationConfig = ref<ConversationConfig | null>(null);
 const modelsLoading = ref(false);
 const showModelSelector = ref(false);
 const modelButtonRef = ref<HTMLElement>();
 const modelDropdownStyle = ref<Record<string, string>>({});
 
-const { t } = useI18n();
-
 // 显示的知识库标签（最多显示2个）
 const displayedKbs = computed(() => selectedKbs.value.slice(0, 2));
 const remainingCount = computed(() => Math.max(0, selectedKbs.value.length - 2));
+
+// 根据不同状态组合计算输入框的 placeholder
+const inputPlaceholder = computed(() => {
+  // 如果选择了自定义智能体
+  if (isCustomAgent.value && selectedAgent.value) {
+    // 有描述时显示描述，否则显示"向 [名称] 提问"
+    if (selectedAgent.value.description) {
+      return selectedAgent.value.description;
+    }
+    return t('input.placeholderAgent', { name: selectedAgent.value.name });
+  }
+  
+  const hasKnowledge = allSelectedItems.value.length > 0;
+  const hasWebSearch = isWebSearchEnabled.value && isWebSearchConfigured.value;
+  
+  if (hasKnowledge && hasWebSearch) {
+    // 有知识库 + 有网络搜索
+    return t('input.placeholderKbAndWeb');
+  } else if (hasKnowledge) {
+    // 有知识库 + 无网络搜索
+    return t('input.placeholderWithContext');
+  } else if (hasWebSearch) {
+    // 无知识库 + 有网络搜索
+    return t('input.placeholderWebOnly');
+  } else {
+    // 无知识库 + 无网络搜索（纯模型对话）
+    return t('input.placeholder');
+  }
+});
 
 // 加载知识库列表
 const loadKnowledgeBases = async () => {
@@ -91,6 +296,31 @@ const loadKnowledgeBases = async () => {
   }
 };
 
+const loadFiles = async () => {
+  const ids = selectedFileIds.value;
+  if (ids.length === 0) return;
+  
+  // Filter out files we already have info for
+  const missingIds = ids.filter((id: string) => !fileList.value.find(f => f.id === id));
+  if (missingIds.length === 0) return;
+
+  try {
+    const query = new URLSearchParams();
+    missingIds.forEach((id: string) => query.append('ids', id));
+    const res: any = await batchQueryKnowledge(query.toString());
+    if (res.data) {
+      const newFiles = res.data.map((f: any) => ({ id: f.id, name: f.title || f.file_name }));
+      fileList.value = [...fileList.value, ...newFiles];
+    }
+  } catch (e) {
+    console.error("Failed to load files", e);
+  }
+};
+
+watch(selectedFileIds, () => {
+  loadFiles();
+}, { immediate: true });
+
 const loadWebSearchConfig = async () => {
   try {
     const response: any = await getTenantWebSearchConfig();
@@ -107,6 +337,16 @@ const loadWebSearchConfig = async () => {
     if (settingsStore.isWebSearchEnabled) {
       settingsStore.toggleWebSearch(false);
     }
+  }
+};
+
+// 加载智能体列表
+const loadAgents = async () => {
+  try {
+    const response = await listAgents();
+    agents.value = response.data || [];
+  } catch (error) {
+    console.error('Failed to load agents:', error);
   }
 };
 
@@ -322,8 +562,354 @@ const updateModelDropdownPosition = () => {
   console.log('[Model Dropdown] Applied style:', modelDropdownStyle.value);
 };
 
+// Mention Logic
+let lastMentionQuery = '';
+const loadMentionItems = async (q: string, resetIndex = true, append = false) => {
+  console.log('[Mention] loadMentionItems called with query:', q, 'append:', append);
+  
+  if (!append) {
+    mentionOffset.value = 0;
+  }
+  
+  // 根据智能体的 kb_selection_mode 过滤知识库
+  let kbItems: any[] = [];
+  if (!append) {
+    // 获取可选的知识库列表
+    let availableKbs = knowledgeBases.value;
+    
+    // 如果智能体有配置，根据 kb_selection_mode 过滤
+    if (hasAgentConfig.value) {
+      const kbMode = agentKBSelectionMode.value;
+      if (kbMode === 'none') {
+        // 不使用知识库，不显示任何知识库
+        availableKbs = [];
+      } else if (kbMode === 'selected') {
+        // 仅显示智能体配置的知识库
+        const configuredKbIds = agentKnowledgeBases.value;
+        availableKbs = knowledgeBases.value.filter(kb => configuredKbIds.includes(kb.id));
+      }
+      // kbMode === 'all' 时显示全部知识库
+    }
+    
+    // 按查询过滤
+    const kbs = availableKbs.filter(kb => 
+      !q || kb.name.toLowerCase().includes(q.toLowerCase())
+    );
+    kbItems = kbs.map(kb => ({ 
+      id: kb.id, 
+      name: kb.name, 
+      type: 'kb' as const, 
+      kbType: kb.type || 'document',
+      count: kb.type === 'faq' ? (kb.chunk_count || 0) : (kb.knowledge_count || 0)
+    }));
+  }
+  
+  // Fetch Files from API
+  // 如果智能体禁用了知识库，也不显示文件
+  let fileItems: any[] = [];
+  const shouldLoadFiles = !hasAgentConfig.value || agentKBSelectionMode.value !== 'none';
+  
+  if (shouldLoadFiles) {
+    mentionLoading.value = true;
+    try {
+      const res: any = await searchKnowledge(q || '', mentionOffset.value, MENTION_PAGE_SIZE);
+      console.log('[Mention] searchKnowledge response:', res);
+      if (res.data && Array.isArray(res.data)) {
+        let files = res.data;
+        
+        // 如果智能体配置了 kb_selection_mode === 'selected'，只显示指定知识库中的文件
+        if (hasAgentConfig.value && agentKBSelectionMode.value === 'selected') {
+          const configuredKbIds = agentKnowledgeBases.value;
+          files = files.filter((f: any) => configuredKbIds.includes(f.knowledge_base_id));
+        }
+        
+        fileItems = files.map((f: any) => ({ 
+          id: f.id, 
+          name: f.title || f.file_name, 
+          type: 'file' as const,
+          kbName: f.knowledge_base_name || ''
+        }));
+      }
+      mentionHasMore.value = res.has_more || false;
+      mentionOffset.value += fileItems.length;
+    } catch (e) {
+      console.error('[Mention] searchKnowledge error:', e);
+      mentionHasMore.value = false;
+    } finally {
+      mentionLoading.value = false;
+    }
+  } else {
+    mentionHasMore.value = false;
+  }
+  
+  if (append) {
+    // Append file items to existing list
+    mentionItems.value = [...mentionItems.value, ...fileItems];
+  } else {
+    mentionItems.value = [...kbItems, ...fileItems];
+  }
+  console.log('[Mention] Total items:', mentionItems.value.length, { kbItems: kbItems.length, fileItems: fileItems.length });
+  
+  // Only reset index if query changed or explicitly requested
+  if (resetIndex || q !== lastMentionQuery) {
+    mentionActiveIndex.value = 0;
+  }
+  // Ensure index is within bounds
+  if (mentionActiveIndex.value >= mentionItems.value.length) {
+    mentionActiveIndex.value = Math.max(0, mentionItems.value.length - 1);
+  }
+  lastMentionQuery = q;
+};
+
+const loadMoreMentionItems = () => {
+  if (mentionHasMore.value && !mentionLoading.value) {
+    loadMentionItems(lastMentionQuery, false, true);
+  }
+};
+
+const getTextareaEl = () => {
+  if (!textareaRef.value) return null;
+  // If it's a native element
+  if (textareaRef.value instanceof HTMLTextAreaElement) return textareaRef.value;
+  // If it's a component wrapper
+  const el = textareaRef.value.$el || textareaRef.value;
+  if (!el) return null;
+  if (el.tagName === 'TEXTAREA') return el as HTMLTextAreaElement;
+  return el.querySelector('textarea');
+};
+
+const onInput = (val: string | InputEvent) => {
+  // 如果正在输入法组合中，不处理搜索逻辑，等待 compositionend
+  if (isComposing.value) return;
+
+  // TDesign t-textarea passes the value directly, not an event
+  const inputVal = typeof val === 'string' ? val : query.value;
+  
+  const textarea = getTextareaEl();
+  if (!textarea) {
+    console.warn('[Mention] Could not get textarea element');
+    return;
+  }
+  
+  const cursor = textarea.selectionStart;
+  const textBeforeCursor = inputVal.slice(0, cursor);
+  
+  console.log('[Mention] onInput called', { inputVal, cursor, textBeforeCursor, showMention: showMention.value });
+  
+  if (showMention.value) {
+    // 如果不是按钮触发的，检查 @ 符号
+    if (!isMentionTriggeredByButton.value) {
+      if (!inputVal || inputVal.length <= mentionStartPos.value || inputVal.charAt(mentionStartPos.value) !== '@') {
+        showMention.value = false;
+        return;
+      }
+    }
+
+    // 如果是按钮触发的，mentionStartPos 指向的是光标位置（即虚拟的 @ 位置前），所以实际上不应该往左删
+    // 但如果用户删除了前面的内容导致长度变短，也需要处理
+    if (cursor < mentionStartPos.value) {
+      showMention.value = false;
+      return;
+    }
+    
+    // Get query
+    // 如果是按钮触发，mentionStartPos 是起始位置，不需要 +1 跳过 @
+    const start = isMentionTriggeredByButton.value ? mentionStartPos.value : mentionStartPos.value + 1;
+    const q = inputVal.slice(start, cursor);
+    
+    if (q.includes(' ')) {
+      showMention.value = false;
+      return;
+    }
+    // Only reload if query changed
+    if (q !== mentionQuery.value) {
+      mentionQuery.value = q;
+      loadMentionItems(q, true); // Reset index when query changes
+    }
+  } else {
+    if (textBeforeCursor.endsWith('@')) {
+      // 如果智能体禁用了知识库，不触发 @ 菜单
+      if (isKnowledgeBaseDisabledByAgent.value) {
+        return;
+      }
+      // 如果智能体锁定了知识库且不允许用户选择，也不触发 @ 菜单
+      if (isKnowledgeBaseLockedByAgent.value) {
+        return;
+      }
+      
+      console.log('[Mention] @ detected, opening menu');
+      isMentionTriggeredByButton.value = false;
+      mentionStartPos.value = cursor - 1;
+      showMention.value = true;
+      mentionQuery.value = "";
+      
+      const coords = getCaretCoordinates(textarea, cursor);
+      const rect = textarea.getBoundingClientRect();
+      const scrollTop = textarea.scrollTop;
+      const menuHeight = 320; // 预估最大高度
+      
+      let left = rect.left + coords.left;
+      // Prevent menu from going off-screen horizontally
+      if (left + 300 > window.innerWidth) {
+        left = window.innerWidth - 300 - 10;
+      }
+      
+      // 光标相对于视口的实际 top 位置
+      const cursorAbsoluteTop = rect.top + coords.top - scrollTop;
+      const lineHeight = coords.height; // 光标高度
+
+      // Check vertical space below cursor
+      const spaceBelow = window.innerHeight - (cursorAbsoluteTop + lineHeight);
+      
+      if (spaceBelow < menuHeight && cursorAbsoluteTop > menuHeight) {
+         // Show above cursor (using bottom positioning)
+         // bottom distance = viewport height - cursor top position
+         const bottom = window.innerHeight - cursorAbsoluteTop;
+         mentionStyle.value = {
+           left: `${left}px`,
+           bottom: `${bottom}px`,
+           top: 'auto'
+         };
+      } else {
+         // Show below cursor (using top positioning)
+         const top = cursorAbsoluteTop + lineHeight;
+         mentionStyle.value = {
+           left: `${left}px`,
+           top: `${top}px`,
+           bottom: 'auto'
+         };
+      }
+      
+      loadMentionItems("");
+    }
+  }
+};
+
+const onCompositionStart = () => {
+  isComposing.value = true;
+};
+
+const onCompositionEnd = (e: CompositionEvent) => {
+  isComposing.value = false;
+  // 手动触发 onInput 逻辑
+  // 注意：在 compositionend 时，v-model 可能还没更新，或者已经更新但我们需要用最新值
+  // TDesign textarea 可能需要 nextTick
+  nextTick(() => {
+    onInput(query.value);
+  });
+};
+
+const triggerMention = () => {
+  // 如果智能体锁定或禁用了知识库，不允许打开选择器
+  if (isKnowledgeBaseLockedByAgent.value) {
+    const msgKey = isKnowledgeBaseDisabledByAgent.value ? 'input.kbDisabledByAgent' : 'input.kbLockedByAgent';
+    MessagePlugin.warning(t(msgKey));
+    return;
+  }
+  
+  const textarea = getTextareaEl();
+  if (!textarea) return;
+  
+  // 关闭其他选择器
+  showAgentModeSelector.value = false;
+  showModelSelector.value = false;
+
+  textarea.focus();
+  
+  // 直接显示菜单，不插入 @
+  showMention.value = true;
+  isMentionTriggeredByButton.value = true;
+  mentionQuery.value = "";
+  mentionStartPos.value = textarea.selectionStart;
+  
+  const rect = textarea.getBoundingClientRect();
+  const menuHeight = 320;
+  
+  // 判断输入框上方空间
+  const spaceAbove = rect.top;
+  const spaceBelow = window.innerHeight - rect.bottom;
+  
+  // 优先显示在上方，除非上方空间不足且下方空间充足
+  if (spaceAbove > menuHeight || spaceAbove > spaceBelow) {
+    // Show above textarea
+    mentionStyle.value = {
+      left: `${rect.left}px`,
+      bottom: `${window.innerHeight - rect.top + 8}px`, // 8px padding
+      top: 'auto'
+    };
+  } else {
+    // Show below textarea
+    mentionStyle.value = {
+      left: `${rect.left}px`,
+      top: `${rect.bottom + 8}px`,
+      bottom: 'auto'
+    };
+  }
+  
+  loadMentionItems("");
+};
+
+const onMentionSelect = (item: any) => {
+  if (item.type === 'kb') {
+      settingsStore.addKnowledgeBase(item.id);
+  } else if (item.type === 'file') {
+      settingsStore.addFile(item.id);
+      // Add to local cache immediately
+      if (!fileList.value.find(f => f.id === item.id)) {
+        fileList.value.push(item);
+      }
+  }
+  
+  const textarea = getTextareaEl();
+  if (textarea) {
+    // 如果是通过输入 @ 触发的，需要删除 @ 和后面的查询文字
+    if (!isMentionTriggeredByButton.value) {
+      const cursor = textarea.selectionStart;
+      const textBeforeAt = query.value.slice(0, mentionStartPos.value);
+      const textAfterCursor = query.value.slice(cursor);
+      query.value = textBeforeAt + textAfterCursor;
+      
+      nextTick(() => {
+        textarea.selectionStart = textarea.selectionEnd = mentionStartPos.value;
+        textarea.focus();
+      });
+    } else {
+      // 通过按钮触发的，如果用户输入了查询词，需要删除查询词
+      const cursor = textarea.selectionStart;
+      if (cursor > mentionStartPos.value) {
+         const textBeforeStart = query.value.slice(0, mentionStartPos.value);
+         const textAfterCursor = query.value.slice(cursor);
+         query.value = textBeforeStart + textAfterCursor;
+         
+         nextTick(() => {
+           textarea.selectionStart = textarea.selectionEnd = mentionStartPos.value;
+           textarea.focus();
+         });
+      } else {
+         // 直接聚焦
+         textarea.focus();
+      }
+    }
+  }
+  
+  showMention.value = false;
+};
+
+const removeFile = (id: string) => {
+  settingsStore.removeFile(id);
+};
+
 const toggleModelSelector = () => {
-  if (selectedKbIds.value.length === 0) return;
+  // 如果智能体锁定了模型，不允许打开选择器
+  if (isModelLockedByAgent.value) {
+    MessagePlugin.warning(t('input.modelLockedByAgent'));
+    return;
+  }
+  
+  // 互斥：关闭其他
+  showMention.value = false;
+  showAgentModeSelector.value = false;
+
   showModelSelector.value = !showModelSelector.value;
   if (showModelSelector.value) {
     if (!availableModels.value.length) {
@@ -351,6 +937,15 @@ const closeAgentModeSelector = () => {
   showAgentModeSelector.value = false;
 };
 
+const closeMentionSelector = (e: MouseEvent) => {
+  const target = e.target as HTMLElement;
+  // 如果点击的是输入框区域，不关闭 Mention 列表（由光标逻辑控制）
+  if (target.closest('.rich-input-container')) {
+    return;
+  }
+  showMention.value = false;
+};
+
 // 窗口事件处理器
 let resizeHandler: (() => void) | null = null;
 let scrollHandler: (() => void) | null = null;
@@ -360,6 +955,7 @@ onMounted(() => {
   loadWebSearchConfig();
   loadConversationConfig();
   loadChatModels();
+  loadAgents();
   
   // 如果从知识库内部进入，自动选中该知识库
   const kbId = (route.params as any)?.kbId as string;
@@ -370,6 +966,7 @@ onMounted(() => {
   // 监听点击外部关闭下拉菜单
   document.addEventListener('click', closeAgentModeSelector);
   document.addEventListener('click', closeModelSelector);
+  document.addEventListener('click', closeMentionSelector);
   
   // 监听窗口大小变化和滚动，重新计算位置
   resizeHandler = () => {
@@ -396,6 +993,7 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', closeAgentModeSelector);
   document.removeEventListener('click', closeModelSelector);
+  document.removeEventListener('click', closeMentionSelector);
   if (resizeHandler) {
     window.removeEventListener('resize', resizeHandler);
   }
@@ -417,8 +1015,8 @@ watch(() => uiStore.showSettingsModal, (visible, prevVisible) => {
   }
 });
 
-watch(selectedKbIds, (ids) => {
-  if (!ids.length) {
+watch([selectedKbIds, selectedFileIds], ([kbIds, fileIds]) => {
+  if (!kbIds.length && !fileIds.length) {
     closeModelSelector();
   }
 }, { deep: true });
@@ -430,14 +1028,17 @@ const createSession = (val: string) => {
     MessagePlugin.info(t('input.messages.enterContent'));
     return;
   }
-  if (selectedKbIds.value.length === 0) {
-    MessagePlugin.warning(t('input.messages.selectKnowledge'));
-    return;
-  }
   if (props.isReplying) {
     return MessagePlugin.error(t('input.messages.replying'));
   }
-  emit('send-msg', val, selectedModelId.value);
+  // 获取@提及的知识库和文件信息
+  const mentionedItems = allSelectedItems.value.map(item => ({
+    id: item.id,
+    name: item.name,
+    type: item.type,
+    kb_type: item.type === 'kb' ? (item.kbType || 'document') : undefined
+  }));
+  emit('send-msg', val, selectedModelId.value, mentionedItems);
   clearvalue();
 }
 
@@ -525,14 +1126,14 @@ const updateAgentModeDropdownPosition = () => {
 };
 
 const toggleAgentModeSelector = () => {
-  // 如果 Agent 未就绪，显示提示
-  if (!settingsStore.isAgentReady && !isAgentEnabled.value) {
-    toggleAgentMode();
-    return;
-  }
-  
+  // 互斥
+  showMention.value = false;
+  showModelSelector.value = false;
+
   showAgentModeSelector.value = !showAgentModeSelector.value;
   if (showAgentModeSelector.value) {
+    // 重新加载智能体列表
+    loadAgents();
     // 多次更新位置确保准确
     nextTick(() => {
       updateAgentModeDropdownPosition();
@@ -546,19 +1147,88 @@ const toggleAgentModeSelector = () => {
   }
 }
 
-const selectAgentMode = (mode: 'normal' | 'agent') => {
-  if (mode === 'agent' && !settingsStore.isAgentReady) {
-    toggleAgentMode();
-    showAgentModeSelector.value = false;
-    return;
+const selectAgentMode = (mode: 'quick-answer' | 'smart-reasoning') => {
+  const builtinAgentId = mode === 'smart-reasoning' ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID;
+  const builtinAgent = agents.value.find(a => a.id === builtinAgentId);
+  
+  if (builtinAgent) {
+    const notReadyReasons = getBuiltinAgentNotReadyReasons(builtinAgent, mode === 'smart-reasoning');
+    if (notReadyReasons.length > 0) {
+      showBuiltinAgentNotReadyMessage(mode, notReadyReasons);
+      showAgentModeSelector.value = false;
+      return;
+    }
   }
   
-  const shouldEnableAgent = mode === 'agent';
+  const shouldEnableAgent = mode === 'smart-reasoning';
   if (shouldEnableAgent !== isAgentEnabled.value) {
     settingsStore.toggleAgent(shouldEnableAgent);
+    // 同时更新选中的智能体
+    settingsStore.selectAgent(shouldEnableAgent ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID);
     MessagePlugin.success(shouldEnableAgent ? t('input.messages.agentSwitchedOn') : t('input.messages.agentSwitchedOff'));
   }
   showAgentModeSelector.value = false;
+}
+
+// 选择智能体（新版）
+const handleSelectAgent = (agent: CustomAgent) => {
+  // 根据智能体的 agent_mode 判断是否为 Agent 模式
+  const isAgentType = agent.config?.agent_mode === 'smart-reasoning';
+  
+  // 内置智能体检查 - 从实际的智能体配置来判断
+  if (agent.is_builtin) {
+    // 从 agents 列表中获取实际的内置智能体数据，如果没找到则使用传入的 agent (此时应该包含合并后的配置)
+    const builtinAgent = agents.value.find(a => a.id === agent.id) || agent;
+    if (builtinAgent) {
+      const notReadyReasons = getBuiltinAgentNotReadyReasons(builtinAgent, isAgentType);
+      if (notReadyReasons.length > 0) {
+        showBuiltinAgentNotReadyMessage(isAgentType ? 'smart-reasoning' : 'quick-answer', notReadyReasons);
+        return;
+      }
+    }
+  }
+  
+  // 自定义智能体检查
+  if (!agent.is_builtin) {
+    const notReadyReasons = getCustomAgentNotReadyReasons(agent);
+    if (notReadyReasons.length > 0) {
+      showCustomAgentNotReadyMessage(agent, notReadyReasons);
+      return;
+    }
+  }
+  
+  selectedAgentId.value = agent.id;
+  settingsStore.toggleAgent(!!isAgentType);
+  
+  // 同步智能体的配置状态（包括内置和自定义智能体）
+  // 1. 同步网络搜索状态
+  const agentWebSearch = agent.config?.web_search_enabled;
+  if (agentWebSearch !== undefined) {
+    // 智能体配置了网络搜索设置，同步到 store
+    settingsStore.toggleWebSearch(agentWebSearch);
+  } else if (agent.is_builtin) {
+    // 如果是内置智能体且未配置网络搜索，不强制修改，保留当前用户设置
+    // 或者可以考虑恢复默认值，视需求而定
+  }
+  
+  // 2. 同步模型
+  const agentModel = agent.config?.model_id;
+  if (agentModel) {
+    selectedModelId.value = agentModel;
+  } else if (agent.is_builtin) {
+    // 如果是内置智能体且未配置特定模型，恢复为系统默认模型
+    // 这样可以确保从专用模型切换回普通模式时，模型也切回通用模型
+    if (conversationConfig.value?.summary_model_id) {
+      selectedModelId.value = conversationConfig.value.summary_model_id;
+    }
+  }
+  
+  showAgentModeSelector.value = false;
+  
+  const message = agent.is_builtin 
+    ? (isAgentType ? t('input.messages.agentSwitchedOn') : t('input.messages.agentSwitchedOff'))
+    : t('input.messages.agentSelected', { name: agent.name });
+  MessagePlugin.success(message);
 }
 
 const clearvalue = () => {
@@ -566,6 +1236,44 @@ const clearvalue = () => {
 }
 
 const onKeydown = (val: string, event: { e: { preventDefault(): unknown; keyCode: number; shiftKey: any; ctrlKey: any; }; }) => {
+  if (showMention.value) {
+    if (event.e.keyCode === 38) { // Up
+      event.e.preventDefault();
+      mentionActiveIndex.value = Math.max(0, mentionActiveIndex.value - 1);
+      return;
+    }
+    if (event.e.keyCode === 40) { // Down
+      event.e.preventDefault();
+      mentionActiveIndex.value = Math.min(mentionItems.value.length - 1, mentionActiveIndex.value + 1);
+      return;
+    }
+    if (event.e.keyCode === 13) { // Enter
+      event.e.preventDefault();
+      if (mentionItems.value[mentionActiveIndex.value]) {
+        onMentionSelect(mentionItems.value[mentionActiveIndex.value]);
+      }
+      return;
+    }
+    if (event.e.keyCode === 27) { // Esc
+        showMention.value = false;
+        return;
+    }
+  }
+
+  // 退格键：当输入框为空且有选中项时，删除最后一个选中项
+  if (event.e.keyCode === 8) { // Backspace
+    const textarea = getTextareaEl();
+    if (textarea && textarea.selectionStart === 0 && textarea.selectionEnd === 0 && query.value === '') {
+      const items = allSelectedItems.value;
+      if (items.length > 0) {
+        event.e.preventDefault();
+        const lastItem = items[items.length - 1];
+        removeSelectedItem(lastItem);
+        return;
+      }
+    }
+  }
+
   if ((event.e.keyCode == 13 && event.e.shiftKey) || (event.e.keyCode == 13 && event.e.ctrlKey)) {
     return;
   }
@@ -582,78 +1290,139 @@ const handleGoToWebSearchSettings = () => {
   }
 };
 
-const handleGoToAgentSettings = () => {
-  // 使用 uiStore 打开设置并跳转到 agent 部分
-  uiStore.openSettings('agent');
-  // 如果当前不在设置页面，导航到设置页面
-  if (route.path !== '/platform/settings') {
-    router.push('/platform/settings');
+const handleGoToAgentSettings = (section?: string) => {
+  // 跳转到智能体列表页并打开编辑弹窗
+  if (selectedAgent.value && !selectedAgent.value.is_builtin) {
+    const query: Record<string, string> = { edit: selectedAgent.value.id };
+    if (section) {
+      query.section = section;
+    }
+    router.push({ path: '/platform/agents', query });
+  } else {
+    router.push('/platform/agents');
   }
-}
+};
 
-// 获取 Agent 不就绪的原因
-const getAgentNotReadyReasons = (): string[] => {
+// 获取内置智能体不就绪的原因
+const getBuiltinAgentNotReadyReasons = (agent: CustomAgent, isAgentMode: boolean): string[] => {
   const reasons: string[] = []
-  const config = settingsStore.agentConfig || { allowedTools: [] }
-  const models = settingsStore.conversationModels || { summaryModelId: '', rerankModelId: '' }
+  const config = agent.config || {}
   
-  if (!config.allowedTools || config.allowedTools.length === 0) {
-    reasons.push(t('input.agentMissingAllowedTools'))
+  // 检查对话模型（Summary Model）
+  if (!config.model_id || config.model_id.trim() === '') {
+    reasons.push(t('input.customAgentMissingSummaryModel'))
   }
-  if (!models.summaryModelId || models.summaryModelId.trim() === '') {
-    reasons.push(t('input.agentMissingSummaryModel'))
+  
+  // 检查重排模型（Rerank Model）- 如果使用知识库则需要
+  if (config.kb_selection_mode !== 'none') {
+    if (!config.rerank_model_id || config.rerank_model_id.trim() === '') {
+      reasons.push(t('input.customAgentMissingRerankModel'))
+    }
   }
-  if (!models.rerankModelId || models.rerankModelId.trim() === '') {
-    reasons.push(t('input.agentMissingRerankModel'))
+  
+  // Agent 模式还需要检查允许的工具
+  if (isAgentMode) {
+    if (!config.allowed_tools || config.allowed_tools.length === 0) {
+      reasons.push(t('input.agentMissingAllowedTools'))
+    }
   }
   
   return reasons
 }
 
-const toggleAgentMode = () => {
-  // 如果要启用 Agent，先检查是否就绪
-  // 注意：isAgentReady 是从 store 中计算的，需要确保 store 中的配置是最新的
-  if (!isAgentEnabled.value) {
-    // 尝试启用 Agent，先检查是否就绪
-    const agentReady = settingsStore.isAgentReady
-    if (!agentReady) {
-      const reasons = getAgentNotReadyReasons()
-      const reasonsText = reasons.join('、')
-      
-      // 创建带跳转链接的自定义消息
-      const messageContent = h('div', { style: 'display: flex; flex-direction: column; gap: 8px; max-width: 320px;' }, [
-        h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.messages.agentNotReadyDetail', { reasons: reasonsText })),
-        h('a', {
-          href: '#',
-          onClick: (e: Event) => {
-            e.preventDefault();
-            handleGoToAgentSettings();
-          },
-          style: 'color: #07C05F; text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
-          onMouseenter: (e: Event) => {
-            (e.target as HTMLElement).style.textDecoration = 'underline';
-          },
-          onMouseleave: (e: Event) => {
-            (e.target as HTMLElement).style.textDecoration = 'none';
-          }
-        }, t('input.goToSettings'))
-      ]);
-      
-      MessagePlugin.warning({
-        content: () => messageContent,
-        duration: 5000
-      });
-      return
+// 获取自定义智能体不就绪的原因（非 Agent 模式，快速回答）
+const getCustomAgentNotReadyReasons = (agent: CustomAgent): string[] => {
+  const reasons: string[] = []
+  const config = agent.config || {}
+  
+  // 检查对话模型（Summary Model）
+  if (!config.model_id || config.model_id.trim() === '') {
+    reasons.push(t('input.customAgentMissingSummaryModel'))
+  }
+  // 检查重排模型（Rerank Model）- 如果使用知识库则需要
+  if (config.kb_selection_mode !== 'none') {
+    if (!config.rerank_model_id || config.rerank_model_id.trim() === '') {
+      reasons.push(t('input.customAgentMissingRerankModel'))
     }
   }
   
-  // 正常切换 Agent 状态
-  settingsStore.toggleAgent(!isAgentEnabled.value);
-  const message = isAgentEnabled.value ? t('input.messages.agentEnabled') : t('input.messages.agentDisabled');
-  MessagePlugin.success(message);
+  return reasons
+}
+
+// 显示自定义智能体未就绪的消息
+const showCustomAgentNotReadyMessage = (agent: CustomAgent, reasons: string[]) => {
+  const reasonsText = reasons.join('、')
+  
+  const messageContent = h('div', { style: 'display: flex; flex-direction: column; gap: 8px; max-width: 320px;' }, [
+    h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.customAgentNotReadyDetail', { reasons: reasonsText })),
+    h('a', {
+      href: '#',
+      onClick: (e: Event) => {
+        e.preventDefault();
+        // 跳转到智能体编辑页面
+        router.push(`/platform/agents?edit=${agent.id}`);
+      },
+      style: 'color: #07C05F; text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
+      onMouseenter: (e: Event) => {
+        (e.target as HTMLElement).style.textDecoration = 'underline';
+      },
+      onMouseleave: (e: Event) => {
+        (e.target as HTMLElement).style.textDecoration = 'none';
+      }
+    }, t('input.goToAgentEditor'))
+  ]);
+  
+  MessagePlugin.warning({
+    content: () => messageContent,
+    duration: 5000
+  });
+}
+
+// 显示内置智能体未就绪的消息
+const showBuiltinAgentNotReadyMessage = (mode: 'smart-reasoning' | 'quick-answer', reasons: string[]) => {
+  const agentName = mode === 'smart-reasoning' 
+    ? t('input.builtinAgentSettingName') 
+    : t('input.builtinNormalSettingName');
+  const builtinAgentId = mode === 'smart-reasoning' ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID;
+  const reasonsText = reasons.join('、')
+  
+  const messageContent = h('div', { style: 'display: flex; flex-direction: column; gap: 8px; max-width: 320px;' }, [
+    h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.builtinAgentNotReadyDetail', { agentName, reasons: reasonsText })),
+    h('a', {
+      href: '#',
+      onClick: (e: Event) => {
+        e.preventDefault();
+        // 跳转到内置智能体编辑页面
+        router.push(`/platform/agents?edit=${builtinAgentId}`);
+      },
+      style: 'color: #07C05F; text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
+      onMouseenter: (e: Event) => {
+        (e.target as HTMLElement).style.textDecoration = 'underline';
+      },
+      onMouseleave: (e: Event) => {
+        (e.target as HTMLElement).style.textDecoration = 'none';
+      }
+    }, t('input.goToAgentEditor'))
+  ]);
+  
+  MessagePlugin.warning({
+    content: () => messageContent,
+    duration: 5000
+  });
 }
 
 const toggleWebSearch = () => {
+  // 互斥：虽然不是弹出层，但操作时关闭其他弹出层体验更好
+  showMention.value = false;
+  showModelSelector.value = false;
+  showAgentModeSelector.value = false;
+
+  // 如果智能体禁用了网络搜索，不允许开启
+  if (isWebSearchDisabledByAgent.value) {
+    MessagePlugin.warning(t('input.webSearchDisabledByAgent'));
+    return;
+  }
+
   if (!isWebSearchConfigured.value) {
     const messageContent = h('div', { style: 'display: flex; flex-direction: column; gap: 6px; max-width: 280px;' }, [
       h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.messages.webSearchNotConfigured')),
@@ -727,7 +1496,55 @@ onBeforeRouteUpdate((to, from, next) => {
 </script>
 <template>
   <div class="answers-input">
-    <t-textarea v-model="query" :placeholder="$t('input.placeholder')" name="description" :autosize="true" @keydown="onKeydown" />
+    <!-- 富文本输入框容器 -->
+    <div class="rich-input-container">
+        <!-- 选中的知识库和文件标签（显示在输入框内顶部） -->
+      <div v-if="allSelectedItems.length > 0" class="selected-tags-inline">
+        <span 
+          v-for="item in allSelectedItems" 
+          :key="item.id" 
+          class="inline-tag"
+          :class="[
+            item.type === 'kb' ? (item.kbType === 'faq' ? 'faq-tag' : 'kb-tag') : 'file-tag',
+            { 'agent-configured': item.isAgentConfigured }
+          ]"
+        >
+          <span class="tag-icon">
+            <t-icon v-if="item.type === 'kb'" :name="item.kbType === 'faq' ? 'chat-bubble-help' : 'folder'" />
+            <t-icon v-else name="file" />
+          </span>
+          <span class="tag-name">{{ item.name }}</span>
+          <span class="tag-remove" @click="removeSelectedItem(item)">×</span>
+        </span>
+      </div>
+      
+      <!-- 实际输入框 -->
+      <t-textarea 
+        ref="textareaRef"
+        v-model="query" 
+        :placeholder="inputPlaceholder" 
+        name="description" 
+        :autosize="true" 
+        @keydown="onKeydown" 
+        @input="onInput"
+        @compositionstart="onCompositionStart"
+        @compositionend="onCompositionEnd"
+      />
+    </div>
+    
+    <!-- Mention Selector -->
+    <Teleport to="body">
+      <MentionSelector
+        :visible="showMention"
+        :style="mentionStyle"
+        :items="mentionItems"
+        :hasMore="mentionHasMore"
+        :loading="mentionLoading"
+        v-model:activeIndex="mentionActiveIndex"
+        @select="onMentionSelect"
+        @loadMore="loadMoreMentionItems"
+      />
+    </Teleport>
     
     <!-- 控制栏 -->
     <div class="control-bar">
@@ -738,33 +1555,14 @@ onBeforeRouteUpdate((to, from, next) => {
           ref="agentModeButtonRef"
           class="control-btn agent-mode-btn"
           :class="{ 
-            'active': isAgentEnabled,
-            'agent-active': isAgentEnabled
+            'is-normal': !isCustomAgent && !isAgentEnabled,
+            'is-agent': !isCustomAgent && isAgentEnabled,
+            'is-custom': isCustomAgent
           }"
           @click.stop="toggleAgentModeSelector"
         >
-          <img 
-            v-if="isAgentEnabled"
-            :src="getImgSrc('agent-active.svg')" 
-            :alt="$t('input.agentMode')" 
-            class="control-icon agent-icon"
-          />
-          <svg 
-            v-else
-            width="18" 
-            height="18" 
-            viewBox="0 0 24 24" 
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            class="control-icon normal-mode-icon"
-          >
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-          </svg>
           <span class="agent-mode-text">
-            {{ isAgentEnabled ? $t('input.agentMode') : $t('input.normalMode') }}
+            {{ selectedAgent.name || (isAgentEnabled ? $t('input.agentMode') : $t('input.normalMode')) }}
           </span>
           <svg 
             width="12" 
@@ -778,87 +1576,34 @@ onBeforeRouteUpdate((to, from, next) => {
           </svg>
         </div>
 
-        <!-- Agent 模式选择下拉菜单 -->
-        <Teleport to="body">
-          <div v-if="showAgentModeSelector" class="agent-mode-selector-overlay" @click="closeAgentModeSelector">
-            <div 
-              class="agent-mode-selector-dropdown"
-              :style="agentModeDropdownStyle"
-              @click.stop
-            >
-              <div 
-                class="agent-mode-option"
-                :class="{ 'selected': !isAgentEnabled }"
-                @click="selectAgentMode('normal')"
-              >
-                <div class="agent-mode-option-main">
-                  <span class="agent-mode-option-name">{{ $t('input.normalMode') }}</span>
-                  <span class="agent-mode-option-desc">{{ $t('input.normalModeDesc') }}</span>
-                </div>
-                <svg 
-                  v-if="!isAgentEnabled"
-                  width="16" 
-                  height="16" 
-                  viewBox="0 0 16 16" 
-                  fill="currentColor"
-                  class="check-icon"
-                >
-                  <path d="M13.5 4.5L6 12L2.5 8.5L3.5 7.5L6 10L12.5 3.5L13.5 4.5Z"/>
-                </svg>
-              </div>
-              <div 
-                class="agent-mode-option"
-                :class="{ 
-                  'selected': isAgentEnabled,
-                  'disabled': !settingsStore.isAgentReady && !isAgentEnabled 
-                }"
-                @click="selectAgentMode('agent')"
-              >
-                <div class="agent-mode-option-main">
-                  <span class="agent-mode-option-name">{{ $t('input.agentMode') }}</span>
-                  <span class="agent-mode-option-desc">{{ $t('input.agentModeDesc') }}</span>
-                </div>
-                <svg 
-                  v-if="isAgentEnabled"
-                  width="16" 
-                  height="16" 
-                  viewBox="0 0 16 16" 
-                  fill="currentColor"
-                  class="check-icon"
-                >
-                  <path d="M13.5 4.5L6 12L2.5 8.5L3.5 7.5L6 10L12.5 3.5L13.5 4.5Z"/>
-                </svg>
-                <div v-if="!settingsStore.isAgentReady && !isAgentEnabled" class="agent-mode-warning">
-                  <t-tooltip :content="$t('input.agentNotReadyTooltip')" placement="left">
-                    <t-icon name="error-circle" class="warning-icon" />
-                  </t-tooltip>
-                </div>
-              </div>
-              <div v-if="!settingsStore.isAgentReady && !isAgentEnabled" class="agent-mode-footer">
-                <a 
-                  href="#"
-                  @click.prevent="handleGoToAgentSettings"
-                  class="agent-mode-link"
-                >
-                  {{ $t('input.goToSettings') }}
-                </a>
-              </div>
-            </div>
-          </div>
-        </Teleport>
+        <!-- Agent 选择器下拉菜单 -->
+        <AgentSelector
+          :visible="showAgentModeSelector"
+          :anchorEl="agentModeButtonRef"
+          :currentAgentId="selectedAgentId"
+          @close="closeAgentModeSelector"
+          @select="handleSelectAgent"
+        />
 
         <!-- WebSearch 开关按钮 -->
-        <t-tooltip placement="top">
+        <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
           <template #content>
-            <span v-if="isWebSearchConfigured">{{ isWebSearchEnabled ? $t('input.webSearch.toggleOff') : $t('input.webSearch.toggleOn') }}</span>
-            <div v-else class="websearch-tooltip-disabled">
+            <div v-if="isWebSearchDisabledByAgent" class="tooltip-with-link">
+              <span>{{ $t('input.webSearchDisabledByAgent') }}</span>
+              <a href="#" @click.prevent="handleGoToAgentSettings('websearch')">{{ $t('input.goToAgentSettings') }}</a>
+            </div>
+            <span v-else-if="isWebSearchConfigured">{{ isWebSearchEnabled ? $t('input.webSearch.toggleOff') : $t('input.webSearch.toggleOn') }}</span>
+            <div v-else class="tooltip-with-link">
               <span>{{ $t('input.webSearch.notConfigured') }}</span>
               <a href="#" @click.prevent="handleGoToWebSearchSettings">{{ $t('input.goToSettings') }}</a>
             </div>
           </template>
           <div 
             class="control-btn websearch-btn"
-            :class="{ 'active': isWebSearchEnabled && isWebSearchConfigured, 'disabled': !isWebSearchConfigured }"
+            :class="{ 
+              'active': isWebSearchEnabled && isWebSearchConfigured, 
+              'disabled': !isWebSearchConfigured || isWebSearchDisabledByAgent
+            }"
             @click.stop="toggleWebSearch"
           >
             <svg 
@@ -879,67 +1624,54 @@ onBeforeRouteUpdate((to, from, next) => {
           </div>
         </t-tooltip>
 
-        <!-- @ 知识库选择按钮 -->
-        <div 
-          ref="atButtonRef"
-          class="control-btn kb-btn"
-          :class="{ 'active': selectedKbIds.length > 0 }"
-          @click="toggleKbSelector"
-        >
-          <img :src="getImgSrc('at-icon.svg')" alt="@" class="control-icon" />
-          <span class="kb-btn-text">
-            {{ selectedKbIds.length > 0 ? $t('input.knowledgeBaseWithCount', { count: selectedKbIds.length }) : $t('input.knowledgeBase') }}
-          </span>
-          <svg 
-            width="12" 
-            height="12" 
-            viewBox="0 0 12 12" 
-            fill="currentColor"
-            class="dropdown-arrow"
-            :class="{ 'rotate': showKbSelector }"
-          >
-            <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z"/>
-          </svg>
-        </div>
-
-        <!-- 已选择的知识库标签 -->
-        <div v-if="displayedKbs.length > 0" class="kb-tags">
+        <!-- @ 知识库/文件选择按钮 -->
+        <t-tooltip placement="top" theme="light" :popupProps="{ overlayClassName: 'input-field-tooltip' }">
+          <template #content>
+            <div v-if="isKnowledgeBaseDisabledByAgent" class="tooltip-with-link">
+              <span>{{ $t('input.kbDisabledByAgent') }}</span>
+              <a href="#" @click.prevent="handleGoToAgentSettings('knowledge')">{{ $t('input.goToAgentSettings') }}</a>
+            </div>
+            <span v-else>{{ allSelectedItems.length > 0 ? $t('input.knowledgeBaseWithCount', { count: allSelectedItems.length }) : $t('input.knowledgeBase') }}</span>
+          </template>
           <div 
-            v-for="kb in displayedKbs" 
-            :key="kb.id" 
-            class="kb-tag"
+            ref="atButtonRef"
+            class="control-btn kb-btn"
+            :class="{ 
+              'active': allSelectedItems.length > 0,
+              'disabled': isKnowledgeBaseDisabledByAgent
+            }"
+            @click.stop
+            @mousedown.prevent="triggerMention"
           >
-            <span class="kb-tag-text">{{ kb.name }}</span>
-            <span class="kb-tag-remove" @click.stop="removeKb(kb.id)">×</span>
+            <img :src="getImgSrc('at-icon.svg')" alt="@" class="control-icon" />
+            <span v-if="allSelectedItems.length > 0" class="kb-count">{{ allSelectedItems.length }}</span>
           </div>
-          <div v-if="remainingCount > 0" class="kb-tag more-tag">
-            +{{ remainingCount }}
-          </div>
-        </div>
+        </t-tooltip>
 
         <!-- 模型显示 -->
-        <div class="model-display">
-          <div
-            ref="modelButtonRef"
-            class="model-selector-trigger"
-            :class="{ disabled: selectedKbIds.length === 0 }"
-            @click.stop="toggleModelSelector"
-          >
-            <span class="model-selector-name">
-              {{ selectedModel?.name || $t('input.notConfigured') }}
-            </span>
-            <svg 
-              width="12" 
-              height="12" 
-              viewBox="0 0 12 12" 
-              fill="currentColor"
-              class="model-dropdown-arrow"
-              :class="{ 'rotate': showModelSelector }"
+        <t-tooltip :content="isModelLockedByAgent ? $t('input.modelLockedByAgent') : ''" :disabled="!isModelLockedByAgent">
+          <div class="model-display" :class="{ 'agent-controlled': isModelLockedByAgent }">
+            <div
+              ref="modelButtonRef"
+              class="model-selector-trigger"
+              @click.stop="toggleModelSelector"
             >
-              <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z"/>
-            </svg>
+              <span class="model-selector-name">
+                {{ selectedModel?.name || $t('input.notConfigured') }}
+              </span>
+              <svg 
+                width="12" 
+                height="12" 
+                viewBox="0 0 12 12" 
+                fill="currentColor"
+                class="model-dropdown-arrow"
+                :class="{ 'rotate': showModelSelector }"
+              >
+                <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z"/>
+              </svg>
+            </div>
           </div>
-        </div>
+        </t-tooltip>
       </div>
 
       <Teleport to="body">
@@ -1002,7 +1734,7 @@ onBeforeRouteUpdate((to, from, next) => {
           v-if="!isReplying"
         @click="createSession(query)" 
         class="control-btn send-btn"
-        :class="{ 'disabled': !query.length || selectedKbIds.length === 0 }"
+        :class="{ 'disabled': !query.length }"
       >
         <img src="../assets/img/sending-aircraft.svg" :alt="$t('input.send')" />
         </div>
@@ -1033,35 +1765,150 @@ const getImgSrc = (url: string) => {
   transform: translateX(-400px);
 }
 
+/* 富文本输入框容器 */
+.rich-input-container {
+  position: relative;
+  width: 800px;
+  background: var(--td-bg-color-container, #FFF);
+  border-radius: 12px;
+  border: 1px solid var(--td-component-border, #E7E7E7);
+  box-shadow: 0 6px 6px 0 rgba(0, 0, 0, 0.04), 0 12px 12px -1px rgba(0, 0, 0, 0.08);
+  
+  &:focus-within {
+    border-color: var(--td-brand-color, #07C05F);
+  }
+}
+
+/* 选中的标签（输入框内顶部） */
+.selected-tags-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--td-component-border, #f0f0f0);
+}
+
+.inline-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+  transition: all 0.15s;
+  background: var(--td-bg-color-secondarycontainer, #f3f3f3);
+  border: 1px solid transparent;
+  color: var(--td-text-color-primary, #333);
+  
+  /* KB - Document (Greenish tint) */
+  &.kb-tag {
+    background: rgba(16, 185, 129, 0.08);
+    color: #059669;
+    
+    .tag-icon {
+      color: #10b981;
+    }
+  }
+
+  /* KB - FAQ (Blueish tint) */
+  &.faq-tag {
+    background: rgba(0, 82, 217, 0.08);
+    color: #0052d9;
+    
+    .tag-icon {
+      color: #0052d9;
+    }
+  }
+  
+  /* File (Orange tint) */
+  &.file-tag {
+    background: rgba(237, 123, 47, 0.08);
+    color: #e65100;
+    
+    .tag-icon {
+      color: #ed7b2f;
+    }
+  }
+  
+  .tag-icon {
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+  }
+  
+  .tag-name {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: currentColor;
+  }
+  
+  .tag-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    margin-left: 2px;
+    border-radius: 50%;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.15s, background 0.15s;
+    color: currentColor;
+    
+    &:hover {
+      opacity: 1;
+      background: rgba(0, 0, 0, 0.1);
+    }
+  }
+  
+  // 智能体配置的标签样式（用虚线边框区分，不显示锁图标）
+  &.agent-configured {
+    border-style: dashed;
+    opacity: 0.9;
+  }
+}
+
 :deep(.t-textarea__inner) {
   width: 100%;
-  width: 800px;
-  max-height: 250px !important;
-  min-height: 112px !important;
+  max-height: 200px !important;
+  min-height: 120px !important;
   resize: none;
-  color: #000000e6;
+  color: var(--td-text-color-primary, #000000e6);
   font-size: 16px;
   font-weight: 400;
   line-height: 24px;
-  font-family: "PingFang SC";
-  padding: 16px 12px 72px 16px;  /* 增加底部padding为控制栏腾出更多空间（原52px -> 72px） */
-  border-radius: 12px;
-  border: 1px solid #E7E7E7;
+  font-family: var(--td-font-family, "PingFang SC");
+  padding: 12px 16px 56px 16px;
+  border-radius: 0 0 12px 12px;
+  border: none;
   box-sizing: border-box;
-  background: #FFF;
-  box-shadow: 0 6px 6px 0 #0000000a, 0 12px 12px -1px #00000014;
+  background: transparent;
+  box-shadow: none;
 
   &:focus {
-    border: 1px solid #07C05F;
+    border: none;
+    box-shadow: none;
   }
 
   &::placeholder {
-    color: #00000066;
-    font-family: "PingFang SC";
+    color: var(--td-text-color-placeholder, #00000066);
+    font-family: var(--td-font-family, "PingFang SC");
     font-size: 16px;
     font-weight: 400;
     line-height: 24px;
   }
+}
+
+/* 当没有选中标签时，textarea 样式 */
+.rich-input-container:not(:has(.selected-tags-inline)) :deep(.t-textarea__inner) {
+  border-radius: 12px;
+  padding-top: 16px;
 }
 
 /* 控制栏 */
@@ -1074,12 +1921,12 @@ const getImgSrc = (url: string) => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  flex-wrap: wrap;  /* 允许换行，避免内容过多时挤压 */
-  max-height: 56px;  /* 限制最大高度为两行 */
-  z-index: 10;  /* 提高z-index，确保在textarea滚动内容之上 */
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.95) 40%, rgba(255, 255, 255, 1) 60%);  /* 更强的渐变背景，从半透明逐渐变为完全不透明 */
-  pointer-events: auto;  /* 确保可以点击 */
-  padding-top: 8px;  /* 增加上边距，给渐变更多空间 */
+  flex-wrap: wrap;
+  max-height: 56px;
+  z-index: 10;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0) 0%, var(--td-bg-color-container, #fff) 40%, var(--td-bg-color-container, #fff) 100%);
+  pointer-events: auto;
+  padding-top: 8px;
 }
 
 .control-left {
@@ -1087,9 +1934,8 @@ const getImgSrc = (url: string) => {
   align-items: center;
   gap: 8px;
   flex: 1;
-  overflow: hidden;
-  flex-wrap: wrap;  /* 允许内部元素换行 */
-  min-width: 0;  /* 允许缩小 */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .control-btn {
@@ -1099,14 +1945,14 @@ const getImgSrc = (url: string) => {
   gap: 4px;
   padding: 6px 10px;
   border-radius: 6px;
-  background: #f5f5f5;
+  background: var(--td-bg-color-secondarycontainer, #f5f5f5);
   cursor: pointer;
   transition: background 0.12s;
   user-select: none;
   flex-shrink: 0;
 
   &:hover {
-    background: #e6e6e6;
+    background: var(--td-bg-color-secondarycontainer-hover, #e6e6e6);
   }
 
   &.disabled {
@@ -1114,7 +1960,7 @@ const getImgSrc = (url: string) => {
     cursor: not-allowed;
     
     &:hover {
-      background: #f5f5f5;
+      background: var(--td-bg-color-secondarycontainer, #f5f5f5);
     }
   }
 }
@@ -1128,46 +1974,63 @@ const getImgSrc = (url: string) => {
   transition: background 0.12s, border-color 0.12s;
   position: relative;
   
-  &.active,
-  &.agent-active {
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(16, 185, 129, 0.1) 100%);
-    border-color: rgba(16, 185, 129, 0.4);
-    box-shadow: 0 2px 6px rgba(16, 185, 129, 0.12);
+  // 内置普通模式 - 绿色
+  &.is-normal {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(16, 185, 129, 0.08) 100%);
+    border-color: rgba(16, 185, 129, 0.35);
     
     .agent-mode-text {
-      color: #07C05F;
+      color: #059669;
       font-weight: 600;
     }
     
-    .agent-icon {
-      filter: brightness(0) saturate(100%) invert(58%) sepia(87%) saturate(1234%) hue-rotate(95deg) brightness(98%) contrast(89%);
-    }
-    
     .dropdown-arrow {
-      color: #07C05F;
+      color: #059669;
     }
     
     &:hover {
-      background: linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(16, 185, 129, 0.15) 100%);
-      border-color: rgba(16, 185, 129, 0.6);
+      background: linear-gradient(135deg, rgba(16, 185, 129, 0.18) 0%, rgba(16, 185, 129, 0.12) 100%);
+      border-color: rgba(16, 185, 129, 0.5);
     }
   }
   
-  &:not(.agent-active) {
-    background: rgba(255, 255, 255, 0.8);
-    border-color: #e0e0e0;
+  // 内置 Agent 模式 - 紫色
+  &.is-agent {
+    background: linear-gradient(135deg, rgba(124, 77, 255, 0.12) 0%, rgba(124, 77, 255, 0.08) 100%);
+    border-color: rgba(124, 77, 255, 0.35);
     
     .agent-mode-text {
-      color: #666;
+      color: #7c4dff;
+      font-weight: 600;
     }
     
-    .normal-mode-icon {
-      color: #666;
+    .dropdown-arrow {
+      color: #7c4dff;
     }
     
     &:hover {
-      background: rgba(255, 255, 255, 1);
-      border-color: #b0b0b0;
+      background: linear-gradient(135deg, rgba(124, 77, 255, 0.18) 0%, rgba(124, 77, 255, 0.12) 100%);
+      border-color: rgba(124, 77, 255, 0.5);
+    }
+  }
+  
+  // 自定义智能体 - 蓝色
+  &.is-custom {
+    background: linear-gradient(135deg, rgba(59, 130, 246, 0.12) 0%, rgba(59, 130, 246, 0.08) 100%);
+    border-color: rgba(59, 130, 246, 0.35);
+    
+    .agent-mode-text {
+      color: #3b82f6;
+      font-weight: 600;
+    }
+    
+    .dropdown-arrow {
+      color: #3b82f6;
+    }
+    
+    &:hover {
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.18) 0%, rgba(59, 130, 246, 0.12) 100%);
+      border-color: rgba(59, 130, 246, 0.5);
     }
   }
 }
@@ -1178,9 +2041,29 @@ const getImgSrc = (url: string) => {
   flex-shrink: 0;
 }
 
+.agent-btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  
+  &.normal {
+    background: rgba(7, 192, 95, 0.12);
+    color: #059669;
+  }
+  
+  &.agent {
+    background: rgba(124, 77, 255, 0.12);
+    color: #7c4dff;
+  }
+}
+
 .agent-mode-text {
   font-size: 13px;
-  color: #666;
+  color: var(--td-text-color-secondary, #666);
   font-weight: 500;
   white-space: nowrap;
   margin: 0 4px;
@@ -1195,6 +2078,7 @@ const getImgSrc = (url: string) => {
   height: 28px;
   padding: 0 10px;
   min-width: auto;
+  position: relative;
   
   &.active {
     background: rgba(16, 185, 129, 0.1);
@@ -1204,11 +2088,41 @@ const getImgSrc = (url: string) => {
       background: rgba(16, 185, 129, 0.15);
     }
   }
+  
+  &.agent-controlled {
+    cursor: not-allowed;
+    opacity: 0.85;
+    
+    &:hover {
+      background: var(--td-bg-color-secondarycontainer, #f5f5f5);
+    }
+    
+    &.active:hover {
+      background: rgba(16, 185, 129, 0.1);
+    }
+  }
+}
+
+.kb-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: #07C05F;
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .kb-btn-text {
   font-size: 13px;
-  color: #666;
+  color: var(--td-text-color-secondary, #666);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -1225,6 +2139,7 @@ const getImgSrc = (url: string) => {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   
   &.active {
     background: rgba(16, 185, 129, 0.1);
@@ -1240,35 +2155,55 @@ const getImgSrc = (url: string) => {
   
   &:not(.active) {
     .websearch-icon {
-      color: #666;
+      color: var(--td-text-color-secondary, #666);
     }
     
     &:hover {
-      background: #f0f0f0;
+      background: var(--td-bg-color-secondarycontainer-hover, #f0f0f0);
       
       .websearch-icon {
-        color: #333;
+        color: var(--td-text-color-primary, #333);
       }
+    }
+  }
+  
+  &.agent-controlled {
+    cursor: not-allowed;
+    opacity: 0.85;
+    
+    &:hover {
+      background: var(--td-bg-color-secondarycontainer, #f5f5f5);
+    }
+    
+    &.active:hover {
+      background: rgba(16, 185, 129, 0.1);
     }
   }
 }
 
-:global(.websearch-tooltip-disabled) {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 220px;
-  font-size: 12px;
-  color: #666;
+:global(.input-field-tooltip) {
+  .t-popup__content {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    border: 1px solid var(--td-component-border, #e7e7e7);
+  }
 }
 
-:global(.websearch-tooltip-disabled a) {
+:global(.tooltip-with-link) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 220px;
+  font-size: 12px;
+  color: var(--td-text-color-primary, #333);
+}
+
+:global(.tooltip-with-link a) {
   color: #07C05F;
   font-weight: 500;
   text-decoration: none;
 }
 
-:global(.websearch-tooltip-disabled a:hover) {
+:global(.tooltip-with-link a:hover) {
   text-decoration: underline;
 }
 
@@ -1285,65 +2220,6 @@ const getImgSrc = (url: string) => {
   
   &.rotate {
     transform: rotate(180deg);
-  }
-}
-
-.kb-tags {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  overflow-x: auto;
-  scrollbar-width: none;
-
-  &::-webkit-scrollbar {
-    display: none;
-  }
-}
-
-.kb-tag {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  background: rgba(16, 185, 129, 0.1);
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  border-radius: 4px;
-  font-size: 12px;
-  color: #10b981;
-  white-space: nowrap;
-  transition: background 0.12s;
-  
-  &:hover {
-    background: rgba(16, 185, 129, 0.15);
-  }
-}
-
-.kb-tag-text {
-  max-width: 100px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.kb-tag-remove {
-  cursor: pointer;
-  font-weight: bold;
-  font-size: 16px;
-  line-height: 1;
-  opacity: 0.7;
-  
-  &:hover {
-    opacity: 1;
-  }
-}
-
-.more-tag {
-  background: rgba(0, 0, 0, 0.05);
-  border-color: rgba(0, 0, 0, 0.1);
-  color: #666;
-  
-  &:hover {
-    background: rgba(0, 0, 0, 0.08);
   }
 }
 
@@ -1412,8 +2288,20 @@ const getImgSrc = (url: string) => {
 .model-display {
   display: flex;
   align-items: center;
-  margin-left: auto;  /* 推到最右边，但仍在 control-left 内 */
+  margin-left: auto;
   flex-shrink: 0;
+  
+  &.agent-controlled {
+    .model-selector-trigger {
+      cursor: not-allowed;
+      opacity: 0.85;
+      
+      &:hover {
+        background: rgba(16, 185, 129, 0.1);
+        border-color: rgba(16, 185, 129, 0.3);
+      }
+    }
+  }
 }
 
 .model-selector-trigger {
@@ -1482,10 +2370,10 @@ const getImgSrc = (url: string) => {
 .model-selector-dropdown {
   position: fixed !important;
   z-index: 9999;
-  background: #fff;
+  background: var(--td-bg-color-container, #fff);
   border-radius: 10px;
-  box-shadow: 0 6px 28px rgba(15, 23, 42, 0.08);
-  border: 1px solid #e7e9eb;
+  box-shadow: var(--td-shadow-2, 0 6px 28px rgba(15, 23, 42, 0.08));
+  border: 1px solid var(--td-component-border, #e7e9eb);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1498,12 +2386,12 @@ const getImgSrc = (url: string) => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px;
-  border-bottom: 1px solid #f2f4f5;
-  background: #fafcfc;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--td-component-stroke, #f0f0f0);
+  background: var(--td-bg-color-container, #fff);
   font-size: 12px;
-  font-weight: 600;
-  color: #222;
+  font-weight: 500;
+  color: var(--td-text-color-secondary, #666);
 }
 
 .model-selector-content {
@@ -1519,26 +2407,26 @@ const getImgSrc = (url: string) => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  border: 1px solid #e1e5e6;
-  background: #fff;
-  color: #52575a;
-  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--td-brand-color, #07c05f);
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.12s;
-}
-
-.model-selector-add .add-icon {
-  font-size: 12px;
-  line-height: 1;
-}
-
-.model-selector-add:hover {
-  border-color: #10b981;
-  color: #10b981;
-  background: #f0fdf6;
+  transition: all 0.2s;
+  
+  .add-icon {
+    font-size: 14px;
+    line-height: 1;
+    font-weight: 400;
+  }
+  
+  &:hover {
+    color: var(--td-brand-color-hover, #05a04f);
+    background: var(--td-bg-color-secondarycontainer, #f3f3f3);
+  }
 }
 
 .model-option {
@@ -1553,11 +2441,11 @@ const getImgSrc = (url: string) => {
   }
   
   &:hover {
-    background: #f6f8f7;
+    background: var(--td-bg-color-container-hover, #f6f8f7);
   }
   
   &.selected {
-    background: #eefdf5;
+    background: var(--td-brand-color-light, #eefdf5);
     
     .model-option-name {
       color: #10b981;
@@ -1566,7 +2454,7 @@ const getImgSrc = (url: string) => {
   }
   
   &.empty {
-    color: #9aa0a6;
+    color: var(--td-text-color-disabled, #9aa0a6);
     cursor: default;
     text-align: center;
     padding: 20px 8px;
@@ -1586,7 +2474,7 @@ const getImgSrc = (url: string) => {
 
 .model-option-name {
   font-size: 12px;
-  color: #222;
+  color: var(--td-text-color-primary, #222);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1596,7 +2484,7 @@ const getImgSrc = (url: string) => {
 
 .model-option-desc {
   font-size: 11px;
-  color: #8b9196;
+  color: var(--td-text-color-secondary, #8b9196);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1635,10 +2523,10 @@ const getImgSrc = (url: string) => {
 .agent-mode-selector-dropdown {
   position: fixed !important;
   z-index: 9999;
-  background: #fff;
+  background: var(--td-bg-color-container, #fff);
   border-radius: 10px;
-  box-shadow: 0 6px 28px rgba(15, 23, 42, 0.08);
-  border: 1px solid #e7e9eb;
+  box-shadow: var(--td-shadow-2, 0 6px 28px rgba(15, 23, 42, 0.08));
+  border: 1px solid var(--td-component-border, #e7e9eb);
   overflow: hidden;
   padding: 6px 8px;
   min-width: 200px;
@@ -1661,7 +2549,7 @@ const getImgSrc = (url: string) => {
   margin: 4px 6px;
   
   &:hover:not(.disabled) {
-    background: #f6f8f7;
+    background: var(--td-bg-color-container-hover, #f6f8f7);
   }
   
   &.disabled {
@@ -1674,7 +2562,7 @@ const getImgSrc = (url: string) => {
   }
   
   &.selected {
-    background: #eefdf5;
+    background: var(--td-brand-color-light, #eefdf5);
     
     .agent-mode-option-name {
       color: #10b981;
@@ -1694,14 +2582,14 @@ const getImgSrc = (url: string) => {
 .agent-mode-option-name {
   font-size: 12px;
   font-weight: 600;
-  color: #222;
+  color: var(--td-text-color-primary, #222);
   line-height: 1.4;
   transition: color 0.12s;
 }
 
 .agent-mode-option-desc {
   font-size: 11px;
-  color: #8b9196;
+  color: var(--td-text-color-secondary, #8b9196);
   line-height: 1.3;
 }
 
@@ -1726,9 +2614,9 @@ const getImgSrc = (url: string) => {
 
 .agent-mode-footer {
   padding: 6px 10px;
-  border-top: 1px solid #f2f4f5;
+  border-top: 1px solid var(--td-component-border, #f2f4f5);
   margin-top: 2px;
-  background: #fafcfc;
+  background: var(--td-bg-color-secondarycontainer, #fafcfc);
 }
 
 .agent-mode-link {

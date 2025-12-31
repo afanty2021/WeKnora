@@ -14,6 +14,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 // ErrInvalidTenantID represents an error for invalid tenant ID
@@ -29,6 +30,7 @@ type knowledgeBaseService struct {
 	tenantRepo     interfaces.TenantRepository
 	fileSvc        interfaces.FileService
 	graphEngine    interfaces.RetrieveGraphRepository
+	asynqClient    *asynq.Client
 }
 
 // NewKnowledgeBaseService creates a new knowledge base service
@@ -40,6 +42,7 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 	tenantRepo interfaces.TenantRepository,
 	fileSvc interfaces.FileService,
 	graphEngine interfaces.RetrieveGraphRepository,
+	asynqClient *asynq.Client,
 ) interfaces.KnowledgeBaseService {
 	return &knowledgeBaseService{
 		repo:           repo,
@@ -50,6 +53,7 @@ func NewKnowledgeBaseService(repo interfaces.KnowledgeBaseRepository,
 		tenantRepo:     tenantRepo,
 		fileSvc:        fileSvc,
 		graphEngine:    graphEngine,
+		asynqClient:    asynqClient,
 	}
 }
 
@@ -213,6 +217,8 @@ func (s *knowledgeBaseService) UpdateKnowledgeBase(ctx context.Context,
 }
 
 // DeleteKnowledgeBase deletes a knowledge base by its ID
+// This method marks the knowledge base as deleted and enqueues an async task
+// to handle the heavy cleanup operations (embeddings, chunks, files, graph data)
 func (s *knowledgeBaseService) DeleteKnowledgeBase(ctx context.Context, id string) error {
 	if id == "" {
 		logger.Error(ctx, "Knowledge base ID is empty")
@@ -223,13 +229,68 @@ func (s *knowledgeBaseService) DeleteKnowledgeBase(ctx context.Context, id strin
 
 	// Get tenant ID from context
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 
-	// Step 1: Get all knowledge entries in this knowledge base
-	logger.Infof(ctx, "Fetching all knowledge entries in knowledge base, ID: %s", id)
-	knowledgeList, err := s.kgRepo.ListKnowledgeByKnowledgeBaseID(ctx, tenantID, id)
+	// Step 1: Delete the knowledge base record first (mark as deleted)
+	logger.Infof(ctx, "Deleting knowledge base from database")
+	err := s.repo.DeleteKnowledgeBase(ctx, id)
 	if err != nil {
 		logger.ErrorWithFields(ctx, err, map[string]interface{}{
 			"knowledge_base_id": id,
+		})
+		return err
+	}
+
+	// Step 2: Enqueue async task for heavy cleanup operations
+	payload := types.KBDeletePayload{
+		TenantID:         tenantID,
+		KnowledgeBaseID:  id,
+		EffectiveEngines: tenantInfo.GetEffectiveEngines(),
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to marshal KB delete payload: %v", err)
+		// Don't fail the request, the KB record is already deleted
+		return nil
+	}
+
+	task := asynq.NewTask(types.TypeKBDelete, payloadBytes, asynq.Queue("low"), asynq.MaxRetry(3))
+	info, err := s.asynqClient.Enqueue(task)
+	if err != nil {
+		logger.Warnf(ctx, "Failed to enqueue KB delete task: %v", err)
+		// Don't fail the request, the KB record is already deleted
+		return nil
+	}
+
+	logger.Infof(ctx, "KB delete task enqueued: %s, knowledge base ID: %s", info.ID, id)
+	logger.Infof(ctx, "Knowledge base deleted successfully, ID: %s", id)
+	return nil
+}
+
+// ProcessKBDelete handles async knowledge base deletion task
+// This method performs heavy cleanup operations: deleting embeddings, chunks, files, and graph data
+func (s *knowledgeBaseService) ProcessKBDelete(ctx context.Context, t *asynq.Task) error {
+	var payload types.KBDeletePayload
+	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+		logger.Errorf(ctx, "Failed to unmarshal KB delete payload: %v", err)
+		return err
+	}
+
+	tenantID := payload.TenantID
+	kbID := payload.KnowledgeBaseID
+
+	// Set tenant context for downstream services
+	ctx = context.WithValue(ctx, types.TenantIDContextKey, tenantID)
+
+	logger.Infof(ctx, "Processing KB delete task for knowledge base: %s", kbID)
+
+	// Step 1: Get all knowledge entries in this knowledge base
+	logger.Infof(ctx, "Fetching all knowledge entries in knowledge base, ID: %s", kbID)
+	knowledgeList, err := s.kgRepo.ListKnowledgeByKnowledgeBaseID(ctx, tenantID, kbID)
+	if err != nil {
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{
+			"knowledge_base_id": kbID,
 		})
 		return err
 	}
@@ -246,28 +307,32 @@ func (s *knowledgeBaseService) DeleteKnowledgeBase(ctx context.Context, id strin
 
 		// Delete embeddings from vector store
 		logger.Infof(ctx, "Deleting embeddings from vector store")
-		tenantInfo := ctx.Value(types.TenantInfoContextKey).(*types.Tenant)
 		retrieveEngine, err := retriever.NewCompositeRetrieveEngine(
 			s.retrieveEngine,
-			tenantInfo.GetEffectiveEngines(),
+			payload.EffectiveEngines,
 		)
 		if err != nil {
 			logger.Warnf(ctx, "Failed to create retrieve engine: %v", err)
 		} else {
-			// Group knowledge by embedding model
-			embeddingGroups := make(map[string][]string)
+			// Group knowledge by embedding model and type
+			type groupKey struct {
+				EmbeddingModelID string
+				Type             string
+			}
+			embeddingGroups := make(map[groupKey][]string)
 			for _, knowledge := range knowledgeList {
-				embeddingGroups[knowledge.EmbeddingModelID] = append(embeddingGroups[knowledge.EmbeddingModelID], knowledge.ID)
+				key := groupKey{EmbeddingModelID: knowledge.EmbeddingModelID, Type: knowledge.Type}
+				embeddingGroups[key] = append(embeddingGroups[key], knowledge.ID)
 			}
 
-			for embeddingModelID, knowledgeGroup := range embeddingGroups {
-				embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
+			for key, knowledgeGroup := range embeddingGroups {
+				embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, key.EmbeddingModelID)
 				if err != nil {
-					logger.Warnf(ctx, "Failed to get embedding model %s: %v", embeddingModelID, err)
+					logger.Warnf(ctx, "Failed to get embedding model %s: %v", key.EmbeddingModelID, err)
 					continue
 				}
-				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeGroup, embeddingModel.GetDimensions()); err != nil {
-					logger.Warnf(ctx, "Failed to delete embeddings for model %s: %v", embeddingModelID, err)
+				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeGroup, embeddingModel.GetDimensions(), key.Type); err != nil {
+					logger.Warnf(ctx, "Failed to delete embeddings for model %s: %v", key.EmbeddingModelID, err)
 				}
 			}
 		}
@@ -316,23 +381,13 @@ func (s *knowledgeBaseService) DeleteKnowledgeBase(ctx context.Context, id strin
 		logger.Infof(ctx, "Deleting knowledge entries from database")
 		if err := s.kgRepo.DeleteKnowledgeList(ctx, tenantID, knowledgeIDs); err != nil {
 			logger.ErrorWithFields(ctx, err, map[string]interface{}{
-				"knowledge_base_id": id,
+				"knowledge_base_id": kbID,
 			})
 			return err
 		}
 	}
 
-	// Step 3: Delete the knowledge base itself
-	logger.Infof(ctx, "Deleting knowledge base from database")
-	err = s.repo.DeleteKnowledgeBase(ctx, id)
-	if err != nil {
-		logger.ErrorWithFields(ctx, err, map[string]interface{}{
-			"knowledge_base_id": id,
-		})
-		return err
-	}
-
-	logger.Infof(ctx, "Knowledge base deleted successfully, ID: %s", id)
+	logger.Infof(ctx, "KB delete task completed successfully, knowledge base ID: %s", kbID)
 	return nil
 }
 
@@ -479,14 +534,23 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		}
 		logger.Infof(ctx, "Query embedding generated successfully, embedding vector length: %d", len(queryEmbedding))
 
-		retrieveParams = append(retrieveParams, types.RetrieveParams{
+		vectorParams := types.RetrieveParams{
 			Query:            params.QueryText,
 			Embedding:        queryEmbedding,
 			KnowledgeBaseIDs: []string{id},
 			TopK:             matchCount,
 			Threshold:        params.VectorThreshold,
 			RetrieverType:    types.VectorRetrieverType,
-		})
+			KnowledgeIDs:     params.KnowledgeIDs,
+			TagIDs:           params.TagIDs,
+		}
+
+		// For FAQ knowledge base, use FAQ index
+		if kb.Type == types.KnowledgeBaseTypeFAQ {
+			vectorParams.KnowledgeType = types.KnowledgeTypeFAQ
+		}
+
+		retrieveParams = append(retrieveParams, vectorParams)
 		logger.Info(ctx, "Vector retrieval parameters setup completed")
 	}
 
@@ -500,6 +564,8 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 			TopK:             matchCount,
 			Threshold:        params.KeywordThreshold,
 			RetrieverType:    types.KeywordsRetrieverType,
+			KnowledgeIDs:     params.KnowledgeIDs,
+			TagIDs:           params.TagIDs,
 		})
 		logger.Info(ctx, "Keyword retrieval parameters setup completed")
 	}
@@ -554,7 +620,8 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		logger.Info(ctx, "Only vector results, keeping original embedding scores")
 		chunkInfoMap := make(map[string]*types.IndexWithScore)
 		for _, r := range vectorResults {
-			if _, exists := chunkInfoMap[r.ChunkID]; !exists {
+			// Keep the highest score for each chunk (FAQ may have multiple similar questions)
+			if existing, exists := chunkInfoMap[r.ChunkID]; !exists || r.Score > existing.Score {
 				chunkInfoMap[r.ChunkID] = r
 			}
 		}
@@ -592,16 +659,17 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		}
 
 		// Collect all unique chunks and compute RRF scores
+		// Keep the highest score for each chunk from each retriever
 		chunkInfoMap := make(map[string]*types.IndexWithScore)
 		rrfScores := make(map[string]float64)
 
-		// Process vector results
+		// Process vector results - keep highest score per chunk
 		for _, r := range vectorResults {
-			if _, exists := chunkInfoMap[r.ChunkID]; !exists {
+			if existing, exists := chunkInfoMap[r.ChunkID]; !exists || r.Score > existing.Score {
 				chunkInfoMap[r.ChunkID] = r
 			}
 		}
-		// Process keyword results
+		// Process keyword results - only add if not already from vector
 		for _, r := range keywordResults {
 			if _, exists := chunkInfoMap[r.ChunkID]; !exists {
 				chunkInfoMap[r.ChunkID] = r
@@ -653,9 +721,8 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 
 	// Check if we need iterative retrieval for FAQ with separate indexing
 	// Only use iterative retrieval if we don't have enough unique chunks after first deduplication
-	totalRetrieved := len(vectorResults) + len(keywordResults)
 	needsIterativeRetrieval := len(deduplicatedChunks) < params.MatchCount &&
-		kb.Type == types.KnowledgeBaseTypeFAQ && totalRetrieved == matchCount*2
+		kb.Type == types.KnowledgeBaseTypeFAQ && len(vectorResults) == matchCount
 	if needsIterativeRetrieval {
 		logger.Info(ctx, "Not enough unique chunks, using iterative retrieval for FAQ")
 		// Use iterative retrieval to get more unique chunks (with negative question filtering inside)
@@ -682,7 +749,7 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 
 // iterativeRetrieveWithDeduplication performs iterative retrieval until enough unique chunks are found
 // This is used for FAQ knowledge bases with separate indexing mode
-// Negative question filtering is applied after each iteration to ensure we have enough valid chunks
+// Negative question filtering is applied after each iteration with chunk data caching
 func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Context,
 	retrieveEngine *retriever.CompositeRetrieveEngine,
 	retrieveParams []types.RetrieveParams,
@@ -690,8 +757,17 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 	queryText string,
 ) []*types.IndexWithScore {
 	maxIterations := 5
-	currentTopK := matchCount
+	// Start with a larger TopK since we're called when first retrieval wasn't enough
+	// The first retrieval already used matchCount*3, so start from there
+	currentTopK := matchCount * 3
 	uniqueChunks := make(map[string]*types.IndexWithScore)
+	// Cache chunk data to avoid repeated DB queries across iterations
+	chunkDataCache := make(map[string]*types.Chunk)
+	// Track chunks that have been filtered out by negative questions
+	filteredOutChunks := make(map[string]struct{})
+
+	queryTextLower := strings.ToLower(strings.TrimSpace(queryText))
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 
 	for i := 0; i < maxIterations; i++ {
 		// Update TopK in retrieve params
@@ -719,42 +795,59 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 			break
 		}
 
-		// Check if we got fewer results than requested - means no more results available
 		totalRetrieved := len(iterationResults)
-		if totalRetrieved < currentTopK {
-			logger.Infof(
-				ctx,
-				"Retrieved %d results (less than TopK %d), no more results available",
-				totalRetrieved,
-				currentTopK,
-			)
+
+		// Collect new chunk IDs that need to be fetched from DB
+		newChunkIDs := make([]string, 0)
+		for _, result := range iterationResults {
+			if _, cached := chunkDataCache[result.ChunkID]; !cached {
+				if _, filtered := filteredOutChunks[result.ChunkID]; !filtered {
+					newChunkIDs = append(newChunkIDs, result.ChunkID)
+				}
+			}
 		}
 
-		// Deduplicate and merge (keep highest score for each chunk)
-		// Multiple similar questions hitting the same chunk will keep the highest score
+		// Batch fetch only new chunks
+		if len(newChunkIDs) > 0 {
+			newChunks, err := s.chunkRepo.ListChunksByID(ctx, tenantID, newChunkIDs)
+			if err != nil {
+				logger.Warnf(ctx, "Failed to fetch chunks at iteration %d: %v", i+1, err)
+			} else {
+				for _, chunk := range newChunks {
+					chunkDataCache[chunk.ID] = chunk
+				}
+			}
+		}
+
+		// Deduplicate, merge, and filter in one pass
 		for _, result := range iterationResults {
+			// Skip if already filtered out
+			if _, filtered := filteredOutChunks[result.ChunkID]; filtered {
+				continue
+			}
+
+			// Check negative questions using cached data
+			if chunkData, ok := chunkDataCache[result.ChunkID]; ok {
+				if chunkData.ChunkType == types.ChunkTypeFAQ {
+					if meta, err := chunkData.FAQMetadata(); err == nil && meta != nil {
+						if s.matchesNegativeQuestions(queryTextLower, meta.NegativeQuestions) {
+							filteredOutChunks[result.ChunkID] = struct{}{}
+							delete(uniqueChunks, result.ChunkID)
+							continue
+						}
+					}
+				}
+			}
+
+			// Keep highest score for each chunk
 			if existing, ok := uniqueChunks[result.ChunkID]; !ok || result.Score > existing.Score {
 				uniqueChunks[result.ChunkID] = result
 			}
 		}
 
-		// Convert to slice for filtering
-		chunksSlice := make([]*types.IndexWithScore, 0, len(uniqueChunks))
-		for _, chunk := range uniqueChunks {
-			chunksSlice = append(chunksSlice, chunk)
-		}
-
-		// Filter by negative questions
-		chunksSlice = s.filterByNegativeQuestions(ctx, chunksSlice, queryText)
-		// Update uniqueChunks map with filtered results
-		uniqueChunks = make(map[string]*types.IndexWithScore, len(chunksSlice))
-		for _, chunk := range chunksSlice {
-			uniqueChunks[chunk.ChunkID] = chunk
-		}
-
 		logger.Infof(
 			ctx,
-			"After iteration %d: retrieved %d results, found %d unique chunks after filtering (target: %d)",
+			"After iteration %d: retrieved %d results, found %d valid unique chunks (target: %d)",
 			i+1,
 			totalRetrieved,
 			len(uniqueChunks),
@@ -769,7 +862,7 @@ func (s *knowledgeBaseService) iterativeRetrieveWithDeduplication(ctx context.Co
 
 		// Early stop: If we got fewer results than TopK, there are no more results to retrieve
 		if totalRetrieved < currentTopK {
-			logger.Infof(ctx, "No more results available, stopping iteration")
+			logger.Infof(ctx, "No more results available (got %d < %d), stopping iteration", totalRetrieved, currentTopK)
 			break
 		}
 
@@ -966,7 +1059,7 @@ func (s *knowledgeBaseService) processSearchResults(ctx context.Context,
 		}
 
 		// Add nearby chunks (prev and next)
-		if chunk.ChunkType == types.ChunkTypeText {
+		if slices.Contains([]string{types.ChunkTypeText}, chunk.ChunkType) {
 			if chunk.NextChunkID != "" && !processedChunkIDs[chunk.NextChunkID] {
 				additionalChunkIDs = append(additionalChunkIDs, chunk.NextChunkID)
 				processedChunkIDs[chunk.NextChunkID] = true
@@ -1099,6 +1192,7 @@ func (s *knowledgeBaseService) buildSearchResult(chunk *types.Chunk,
 func (s *knowledgeBaseService) isValidTextChunk(chunk *types.Chunk) bool {
 	return slices.Contains([]types.ChunkType{
 		types.ChunkTypeText, types.ChunkTypeSummary,
+		types.ChunkTypeTableColumn, types.ChunkTypeTableSummary,
 		types.ChunkTypeFAQ,
 	}, chunk.ChunkType)
 }

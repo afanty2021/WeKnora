@@ -10,16 +10,25 @@ import (
 // AgentConfig represents the full agent configuration (used at tenant level and runtime)
 // This includes all configuration parameters for agent execution
 type AgentConfig struct {
-	MaxIterations           int      `json:"max_iterations"`                       // Maximum number of ReAct iterations
-	ReflectionEnabled       bool     `json:"reflection_enabled"`                   // Whether to enable reflection
-	AllowedTools            []string `json:"allowed_tools"`                        // List of allowed tool names
-	Temperature             float64  `json:"temperature"`                          // LLM temperature for agent
-	KnowledgeBases          []string `json:"knowledge_bases"`                      // Accessible knowledge base IDs
-	SystemPromptWebEnabled  string   `json:"system_prompt_web_enabled,omitempty"`  // Custom prompt when web search is enabled
-	SystemPromptWebDisabled string   `json:"system_prompt_web_disabled,omitempty"` // Custom prompt when web search is disabled
-	UseCustomSystemPrompt   bool     `json:"use_custom_system_prompt"`             // Whether to use custom system prompt instead of default
-	WebSearchEnabled        bool     `json:"web_search_enabled"`                   // Whether web search tool is enabled
-	WebSearchMaxResults     int      `json:"web_search_max_results"`               // Maximum number of web search results (default: 5)
+	MaxIterations     int      `json:"max_iterations"`          // Maximum number of ReAct iterations
+	ReflectionEnabled bool     `json:"reflection_enabled"`      // Whether to enable reflection
+	AllowedTools      []string `json:"allowed_tools"`           // List of allowed tool names
+	Temperature       float64  `json:"temperature"`             // LLM temperature for agent
+	KnowledgeBases    []string `json:"knowledge_bases"`         // Accessible knowledge base IDs
+	KnowledgeIDs      []string `json:"knowledge_ids"`           // Accessible knowledge IDs (individual documents)
+	SystemPrompt      string   `json:"system_prompt,omitempty"` // Unified system prompt (uses {{web_search_status}} placeholder for dynamic behavior)
+	// Deprecated: Use SystemPrompt instead. Kept for backward compatibility during migration.
+	SystemPromptWebEnabled  string        `json:"system_prompt_web_enabled,omitempty"`  // Deprecated: Custom prompt when web search is enabled
+	SystemPromptWebDisabled string        `json:"system_prompt_web_disabled,omitempty"` // Deprecated: Custom prompt when web search is disabled
+	UseCustomSystemPrompt   bool          `json:"use_custom_system_prompt"`             // Whether to use custom system prompt instead of default
+	WebSearchEnabled        bool          `json:"web_search_enabled"`                   // Whether web search tool is enabled
+	WebSearchMaxResults     int           `json:"web_search_max_results"`               // Maximum number of web search results (default: 5)
+	MultiTurnEnabled        bool          `json:"multi_turn_enabled"`                   // Whether multi-turn conversation is enabled
+	HistoryTurns            int           `json:"history_turns"`                        // Number of history turns to keep in context
+	SearchTargets           SearchTargets `json:"-"`                                    // Pre-computed unified search targets (runtime only)
+	// MCP service selection
+	MCPSelectionMode string   `json:"mcp_selection_mode"` // MCP selection mode: "all", "selected", "none"
+	MCPServices      []string `json:"mcp_services"`       // Selected MCP service IDs (when mode is "selected")
 }
 
 // SessionAgentConfig represents session-level agent configuration
@@ -28,6 +37,7 @@ type SessionAgentConfig struct {
 	AgentModeEnabled bool     `json:"agent_mode_enabled"` // Whether agent mode is enabled for this session
 	WebSearchEnabled bool     `json:"web_search_enabled"` // Whether web search is enabled for this session
 	KnowledgeBases   []string `json:"knowledge_bases"`    // Accessible knowledge base IDs for this session
+	KnowledgeIDs     []string `json:"knowledge_ids"`      // Accessible knowledge IDs (individual documents) for this session
 }
 
 // Value implements driver.Valuer interface for AgentConfig
@@ -65,11 +75,18 @@ func (c *SessionAgentConfig) Scan(value interface{}) error {
 }
 
 // ResolveSystemPrompt returns the prompt template for the given web search state.
+// It uses the unified SystemPrompt field, falling back to deprecated fields for backward compatibility.
 func (c *AgentConfig) ResolveSystemPrompt(webSearchEnabled bool) string {
 	if c == nil {
 		return ""
 	}
 
+	// First, try the new unified SystemPrompt field
+	if c.SystemPrompt != "" {
+		return c.SystemPrompt
+	}
+
+	// Fallback to deprecated fields for backward compatibility
 	if webSearchEnabled {
 		if c.SystemPromptWebEnabled != "" {
 			return c.SystemPromptWebEnabled
@@ -92,10 +109,10 @@ type Tool interface {
 	Description() string
 
 	// Parameters returns the JSON Schema for the tool's parameters
-	Parameters() map[string]interface{}
+	Parameters() json.RawMessage
 
 	// Execute runs the tool with the given arguments
-	Execute(ctx context.Context, args map[string]interface{}) (*ToolResult, error)
+	Execute(ctx context.Context, args json.RawMessage) (*ToolResult, error)
 }
 
 // ToolResult represents the result of a tool execution
@@ -150,7 +167,7 @@ type AgentState struct {
 
 // FunctionDefinition represents a function definition for LLM function calling
 type FunctionDefinition struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Parameters  map[string]interface{} `json:"parameters"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }

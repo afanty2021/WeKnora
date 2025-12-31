@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,6 +17,7 @@ type FAQEntry struct {
 	KnowledgeID       string    `json:"knowledge_id"`
 	KnowledgeBaseID   string    `json:"knowledge_base_id"`
 	TagID             string    `json:"tag_id"`
+	TagName           string    `json:"tag_name"`
 	IsEnabled         bool      `json:"is_enabled"`
 	IsRecommended     bool      `json:"is_recommended"`
 	StandardQuestion  string    `json:"standard_question"`
@@ -67,6 +69,8 @@ type FAQEntryFieldsBatchRequest struct {
 	ByID map[string]FAQEntryFieldsUpdate `json:"by_id,omitempty"`
 	// ByTag updates all entries under a tag, key is tag ID (empty string for uncategorized)
 	ByTag map[string]FAQEntryFieldsUpdate `json:"by_tag,omitempty"`
+	// ExcludeIDs IDs to exclude from the ByTag update
+	ExcludeIDs []string `json:"exclude_ids,omitempty"`
 }
 
 // FAQEntryTagBatchRequest updates tags in bulk.
@@ -81,9 +85,11 @@ type FAQDeleteRequest struct {
 
 // FAQSearchRequest represents the hybrid FAQ search request.
 type FAQSearchRequest struct {
-	QueryText       string  `json:"query_text"`
-	VectorThreshold float64 `json:"vector_threshold"`
-	MatchCount      int     `json:"match_count"`
+	QueryText            string   `json:"query_text"`
+	VectorThreshold      float64  `json:"vector_threshold"`
+	MatchCount           int      `json:"match_count"`
+	FirstPriorityTagIDs  []string `json:"first_priority_tag_ids"`  // First priority tag IDs, highest priority
+	SecondPriorityTagIDs []string `json:"second_priority_tag_ids"` // Second priority tag IDs, lower than first
 }
 
 // FAQEntriesPage contains paginated FAQ results.
@@ -138,8 +144,10 @@ type faqSimpleResponse struct {
 }
 
 // ListFAQEntries returns paginated FAQ entries under a knowledge base.
+// searchField: specifies which field to search in ("standard_question", "similar_questions", "answers", "" for all)
+// sortOrder: "asc" for time ascending (updated_at ASC), default is time descending (updated_at DESC)
 func (c *Client) ListFAQEntries(ctx context.Context,
-	knowledgeBaseID string, page, pageSize int, tagID string, keyword string,
+	knowledgeBaseID string, page, pageSize int, tagID string, keyword string, searchField string, sortOrder string,
 ) (*FAQEntriesPage, error) {
 	path := fmt.Sprintf("/api/v1/knowledge-bases/%s/faq/entries", knowledgeBaseID)
 	query := url.Values{}
@@ -154,6 +162,12 @@ func (c *Client) ListFAQEntries(ctx context.Context,
 	}
 	if keyword != "" {
 		query.Add("keyword", keyword)
+	}
+	if searchField != "" {
+		query.Add("search_field", searchField)
+	}
+	if sortOrder != "" {
+		query.Add("sort_order", sortOrder)
 	}
 
 	resp, err := c.doRequest(ctx, http.MethodGet, path, nil, query)
@@ -208,6 +222,23 @@ func (c *Client) CreateFAQEntry(ctx context.Context,
 	return response.Data, nil
 }
 
+// GetFAQEntry retrieves a single FAQ entry by ID.
+func (c *Client) GetFAQEntry(ctx context.Context,
+	knowledgeBaseID, entryID string,
+) (*FAQEntry, error) {
+	path := fmt.Sprintf("/api/v1/knowledge-bases/%s/faq/entries/%s", knowledgeBaseID, entryID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response FAQEntryResponse
+	if err := parseResponse(resp, &response); err != nil {
+		return nil, err
+	}
+	return response.Data, nil
+}
+
 // UpdateFAQEntry updates a single FAQ entry.
 func (c *Client) UpdateFAQEntry(ctx context.Context,
 	knowledgeBaseID, entryID string, payload *FAQEntryPayload,
@@ -228,10 +259,10 @@ func (c *Client) UpdateFAQEntry(ctx context.Context,
 //   - byID: update by entry ID, key is entry ID
 //   - byTag: update all entries under a tag, key is tag ID (empty string for uncategorized)
 func (c *Client) UpdateFAQEntryFieldsBatch(ctx context.Context,
-	knowledgeBaseID string, byID map[string]FAQEntryFieldsUpdate, byTag map[string]FAQEntryFieldsUpdate,
+	knowledgeBaseID string, byID map[string]FAQEntryFieldsUpdate, byTag map[string]FAQEntryFieldsUpdate, excludeIDs []string,
 ) error {
 	path := fmt.Sprintf("/api/v1/knowledge-bases/%s/faq/entries/fields", knowledgeBaseID)
-	resp, err := c.doRequest(ctx, http.MethodPut, path, &FAQEntryFieldsBatchRequest{ByID: byID, ByTag: byTag}, nil)
+	resp, err := c.doRequest(ctx, http.MethodPut, path, &FAQEntryFieldsBatchRequest{ByID: byID, ByTag: byTag, ExcludeIDs: excludeIDs}, nil)
 	if err != nil {
 		return err
 	}
@@ -283,5 +314,65 @@ func (c *Client) SearchFAQEntries(ctx context.Context,
 		return nil, err
 	}
 
+	return response.Data, nil
+}
+
+// ExportFAQEntries exports all FAQ entries from a knowledge base as CSV data.
+// The CSV format matches the import example format with 8 columns:
+// 分类(必填), 问题(必填), 相似问题(选填-多个用##分隔), 反例问题(选填-多个用##分隔),
+// 机器人回答(必填-多个用##分隔), 是否全部回复(选填-默认FALSE), 是否停用(选填-默认FALSE),
+// 是否禁止被推荐(选填-默认False 可被推荐)
+func (c *Client) ExportFAQEntries(ctx context.Context, knowledgeBaseID string) ([]byte, error) {
+	path := fmt.Sprintf("/api/v1/knowledge-bases/%s/faq/entries/export", knowledgeBaseID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Read the raw CSV data from response body
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read export response: %w", err)
+	}
+
+	return data, nil
+}
+
+// FAQImportProgress represents the progress of an async FAQ import task.
+type FAQImportProgress struct {
+	TaskID      string `json:"task_id"`
+	KBID        string `json:"kb_id"`
+	KnowledgeID string `json:"knowledge_id"`
+	Status      string `json:"status"`
+	Progress    int    `json:"progress"`
+	Total       int    `json:"total"`
+	Processed   int    `json:"processed"`
+	Message     string `json:"message"`
+	Error       string `json:"error,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+// FAQImportProgressResponse wraps the FAQ import progress response.
+type FAQImportProgressResponse struct {
+	Success bool               `json:"success"`
+	Data    *FAQImportProgress `json:"data"`
+	Message string             `json:"message,omitempty"`
+	Code    string             `json:"code,omitempty"`
+}
+
+// GetFAQImportProgress retrieves the progress of an async FAQ import task.
+func (c *Client) GetFAQImportProgress(ctx context.Context, taskID string) (*FAQImportProgress, error) {
+	path := fmt.Sprintf("/api/v1/faq/import/progress/%s", taskID)
+	resp, err := c.doRequest(ctx, http.MethodGet, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response FAQImportProgressResponse
+	if err := parseResponse(resp, &response); err != nil {
+		return nil, err
+	}
 	return response.Data, nil
 }

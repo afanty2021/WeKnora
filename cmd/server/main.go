@@ -1,5 +1,25 @@
 // Package main is the main package for the WeKnora server
 // It contains the main function and the entry point for the server
+//
+// @title           WeKnora API
+// @version         1.0
+// @description     WeKnora 知识库管理系统 API 文档
+// @termsOfService  http://swagger.io/terms/
+//
+// @contact.name   WeKnora Github
+// @contact.url    https://github.com/Tencent/WeKnora
+//
+// @BasePath  /api/v1
+//
+// @securityDefinitions.apikey Bearer
+// @in header
+// @name Authorization
+// @description 用户登录认证：输入 Bearer {token} 格式的 JWT 令牌
+
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name X-API-Key
+// @description 租户身份认证：输入 sk- 开头的 API Key
 package main
 
 import (

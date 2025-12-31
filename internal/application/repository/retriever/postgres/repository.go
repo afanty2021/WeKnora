@@ -10,6 +10,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+	"github.com/google/uuid"
 	"github.com/pgvector/pgvector-go"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -107,7 +108,7 @@ func (g *pgRepository) BatchSave(
 }
 
 // DeleteByChunkIDList deletes indices by chunk IDs
-func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int) error {
+func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []string, dimension int, knowledgeType string) error {
 	logger.GetLogger(ctx).Infof("[Postgres] Deleting indices by chunk IDs, count: %d", len(chunkIDList))
 	result := g.db.WithContext(ctx).Where("chunk_id IN ?", chunkIDList).Delete(&pgVector{})
 	if result.Error != nil {
@@ -119,7 +120,7 @@ func (g *pgRepository) DeleteByChunkIDList(ctx context.Context, chunkIDList []st
 }
 
 // DeleteBySourceIDList deletes indices by source IDs
-func (g *pgRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int) error {
+func (g *pgRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []string, dimension int, knowledgeType string) error {
 	if len(sourceIDList) == 0 {
 		return nil
 	}
@@ -134,7 +135,7 @@ func (g *pgRepository) DeleteBySourceIDList(ctx context.Context, sourceIDList []
 }
 
 // DeleteByKnowledgeIDList deletes indices by knowledge IDs
-func (g *pgRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, dimension int) error {
+func (g *pgRepository) DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, dimension int, knowledgeType string) error {
 	logger.GetLogger(ctx).Infof("[Postgres] Deleting indices by knowledge IDs, count: %d", len(knowledgeIDList))
 	result := g.db.WithContext(ctx).Where("knowledge_id IN ?", knowledgeIDList).Delete(&pgVector{})
 	if result.Error != nil {
@@ -165,12 +166,31 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 ) ([]*types.RetrieveResult, error) {
 	logger.GetLogger(ctx).Infof("[Postgres] Keywords retrieval: query=%s, topK=%d", params.Query, params.TopK)
 	conds := make([]clause.Expression, 0)
+
+	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
+	// - If only KnowledgeBaseIDs: search entire knowledge bases
+	// - If only KnowledgeIDs: search specific documents
+	// - If both: search specific documents within the knowledge bases (AND)
 	if len(params.KnowledgeBaseIDs) > 0 {
 		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by knowledge base IDs: %v", params.KnowledgeBaseIDs)
-		// Use standard SQL IN clause instead of @@@ operator for better performance with B-tree index
 		conds = append(conds, clause.IN{
 			Column: "knowledge_base_id",
 			Values: common.ToInterfaceSlice(params.KnowledgeBaseIDs),
+		})
+	}
+	if len(params.KnowledgeIDs) > 0 {
+		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by knowledge IDs: %v", params.KnowledgeIDs)
+		conds = append(conds, clause.IN{
+			Column: "knowledge_id",
+			Values: common.ToInterfaceSlice(params.KnowledgeIDs),
+		})
+	}
+	// Filter by tag IDs if specified
+	if len(params.TagIDs) > 0 {
+		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by tag IDs: %v", params.TagIDs)
+		conds = append(conds, clause.IN{
+			Column: "tag_id",
+			Values: common.ToInterfaceSlice(params.TagIDs),
 		})
 	}
 	conds = append(conds, clause.Expr{
@@ -197,6 +217,7 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 			"chunk_id",
 			"knowledge_id",
 			"knowledge_base_id",
+			"tag_id",
 		}).
 		Limit(int(params.TopK)).
 		Find(&embeddingDBList).Error
@@ -249,13 +270,15 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	whereParts = append(whereParts, fmt.Sprintf("dimension = $%d", len(allVars)+1))
 	allVars = append(allVars, dimension)
 
-	// Knowledge base filter
+	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
+	// - If only KnowledgeBaseIDs: search entire knowledge bases
+	// - If only KnowledgeIDs: search specific documents
+	// - If both: search specific documents within the knowledge bases (AND)
 	if len(params.KnowledgeBaseIDs) > 0 {
 		logger.GetLogger(ctx).Debugf(
 			"[Postgres] Filtering vector search by knowledge base IDs: %v",
 			params.KnowledgeBaseIDs,
 		)
-		// Build IN clause with proper placeholders
 		placeholders := make([]string, len(params.KnowledgeBaseIDs))
 		paramStart := len(allVars) + 1
 		for i := range params.KnowledgeBaseIDs {
@@ -263,6 +286,35 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			allVars = append(allVars, params.KnowledgeBaseIDs[i])
 		}
 		whereParts = append(whereParts, fmt.Sprintf("knowledge_base_id IN (%s)",
+			strings.Join(placeholders, ", ")))
+	}
+	if len(params.KnowledgeIDs) > 0 {
+		logger.GetLogger(ctx).Debugf(
+			"[Postgres] Filtering vector search by knowledge IDs: %v",
+			params.KnowledgeIDs,
+		)
+		placeholders := make([]string, len(params.KnowledgeIDs))
+		paramStart := len(allVars) + 1
+		for i := range params.KnowledgeIDs {
+			placeholders[i] = fmt.Sprintf("$%d", paramStart+i)
+			allVars = append(allVars, params.KnowledgeIDs[i])
+		}
+		whereParts = append(whereParts, fmt.Sprintf("knowledge_id IN (%s)",
+			strings.Join(placeholders, ", ")))
+	}
+	// Filter by tag IDs if specified
+	if len(params.TagIDs) > 0 {
+		logger.GetLogger(ctx).Debugf(
+			"[Postgres] Filtering vector search by tag IDs: %v",
+			params.TagIDs,
+		)
+		placeholders := make([]string, len(params.TagIDs))
+		paramStart := len(allVars) + 1
+		for i := range params.TagIDs {
+			placeholders[i] = fmt.Sprintf("$%d", paramStart+i)
+			allVars = append(allVars, params.TagIDs[i])
+		}
+		whereParts = append(whereParts, fmt.Sprintf("tag_id IN (%s)",
 			strings.Join(placeholders, ", ")))
 	}
 
@@ -295,11 +347,11 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 
 	querySQL := fmt.Sprintf(`
 		SELECT 
-			id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id,
+			id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
 			(1 - distance) as score
 		FROM (
 			SELECT 
-				id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id,
+				id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
 				embedding::halfvec(%d) <=> $1::halfvec as distance
 			FROM embeddings
 			%s
@@ -357,6 +409,7 @@ func (g *pgRepository) CopyIndices(ctx context.Context,
 	sourceToTargetChunkIDMap map[string]string,
 	targetKnowledgeBaseID string,
 	dimension int,
+	knowledgeType string,
 ) error {
 	logger.GetLogger(ctx).Infof(
 		"[Postgres] Copying indices, source knowledge base: %s, target knowledge base: %s, mapping count: %d",
@@ -422,10 +475,26 @@ func (g *pgRepository) CopyIndices(ctx context.Context,
 				continue
 			}
 
+			// Handle SourceID transformation for generated questions
+			// Generated questions have SourceID format: {chunkID}-{questionID}
+			// Regular chunks have SourceID == ChunkID
+			var targetSourceID string
+			if sourceVector.SourceID == sourceVector.ChunkID {
+				// Regular chunk, use targetChunkID as SourceID
+				targetSourceID = targetChunkID
+			} else if strings.HasPrefix(sourceVector.SourceID, sourceVector.ChunkID+"-") {
+				// This is a generated question, preserve the questionID part
+				questionID := strings.TrimPrefix(sourceVector.SourceID, sourceVector.ChunkID+"-")
+				targetSourceID = fmt.Sprintf("%s-%s", targetChunkID, questionID)
+			} else {
+				// For other complex scenarios, generate new unique SourceID
+				targetSourceID = uuid.New().String()
+			}
+
 			// Create new vector index, copy the content and vector of the source index
 			targetVector := &pgVector{
 				Content:         sourceVector.Content,
-				SourceID:        targetChunkID, // Update to target chunk ID
+				SourceID:        targetSourceID,        // Handle SourceID transformation properly
 				SourceType:      sourceVector.SourceType,
 				ChunkID:         targetChunkID,         // Update to target chunk ID
 				KnowledgeID:     targetKnowledgeID,     // Update to target knowledge ID
@@ -514,5 +583,37 @@ func (g *pgRepository) BatchUpdateChunkEnabledStatus(ctx context.Context, chunkS
 	}
 
 	logger.GetLogger(ctx).Infof("[Postgres] Successfully batch updated chunk enabled status")
+	return nil
+}
+
+// BatchUpdateChunkTagID updates the tag ID of chunks in batch
+func (g *pgRepository) BatchUpdateChunkTagID(ctx context.Context, chunkTagMap map[string]string) error {
+	if len(chunkTagMap) == 0 {
+		logger.GetLogger(ctx).Warnf("[Postgres] Chunk tag map is empty, skipping update")
+		return nil
+	}
+
+	logger.GetLogger(ctx).Infof("[Postgres] Batch updating chunk tag ID, count: %d", len(chunkTagMap))
+
+	// Group chunks by tag ID for batch updates
+	tagGroups := make(map[string][]string)
+	for chunkID, tagID := range chunkTagMap {
+		tagGroups[tagID] = append(tagGroups[tagID], chunkID)
+	}
+
+	// Batch update chunks for each tag ID
+	for tagID, chunkIDs := range tagGroups {
+		result := g.db.WithContext(ctx).Model(&pgVector{}).
+			Where("chunk_id IN ?", chunkIDs).
+			Update("tag_id", tagID)
+		if result.Error != nil {
+			logger.GetLogger(ctx).Errorf("[Postgres] Failed to update chunks with tag_id %s: %v", tagID, result.Error)
+			return result.Error
+		}
+		logger.GetLogger(ctx).
+			Infof("[Postgres] Updated %d chunks to tag_id=%s, rows affected: %d", len(chunkIDs), tagID, result.RowsAffected)
+	}
+
+	logger.GetLogger(ctx).Infof("[Postgres] Successfully batch updated chunk tag ID")
 	return nil
 }
