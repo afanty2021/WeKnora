@@ -129,6 +129,12 @@ const agentModelId = computed(() => {
   return currentAgentConfig.value?.model_id || null;
 });
 
+// 智能体支持的文件类型（空数组表示支持所有类型）
+const agentSupportedFileTypes = computed(() => {
+  if (!hasAgentConfig.value) return [];
+  return currentAgentConfig.value?.supported_file_types || [];
+});
+
 // 模型选择是否被智能体锁定 - 已移除锁定逻辑，允许用户自由切换模型
 const isModelLockedByAgent = computed(() => {
   return false;
@@ -354,12 +360,17 @@ const loadConversationConfig = async () => {
   try {
     const response = await getConversationConfig();
     conversationConfig.value = response.data;
+    const modelId = response.data?.summary_model_id || '';
+    
+    // 保留当前已选择的模型（如果有），避免覆盖从其他页面传递的模型选择
+    const currentSelectedModel = settingsStore.conversationModels.selectedChatModelId;
     settingsStore.updateConversationModels({
-      summaryModelId: response.data?.summary_model_id || '',
+      summaryModelId: modelId,
+      selectedChatModelId: currentSelectedModel || modelId,  // 优先保留当前选择
       rerankModelId: response.data?.rerank_model_id || '',
     });
     if (!selectedModelId.value) {
-      selectedModelId.value = response.data?.summary_model_id || '';
+      selectedModelId.value = modelId;
     }
     ensureModelSelection();
   } catch (error) {
@@ -437,6 +448,7 @@ const handleModelChange = async (value: string | number | Array<string | number>
       // 同步到 store
       settingsStore.updateConversationModels({
         summaryModelId: val,
+        selectedChatModelId: val,
         rerankModelId: conversationConfig.value?.rerank_model_id || '',
       });
       
@@ -612,7 +624,9 @@ const loadMentionItems = async (q: string, resetIndex = true, append = false) =>
   if (shouldLoadFiles) {
     mentionLoading.value = true;
     try {
-      const res: any = await searchKnowledge(q || '', mentionOffset.value, MENTION_PAGE_SIZE);
+      // 将文件类型过滤传递给后端
+      const fileTypesParam = agentSupportedFileTypes.value.length > 0 ? agentSupportedFileTypes.value : undefined;
+      const res: any = await searchKnowledge(q || '', mentionOffset.value, MENTION_PAGE_SIZE, fileTypesParam);
       console.log('[Mention] searchKnowledge response:', res);
       if (res.data && Array.isArray(res.data)) {
         let files = res.data;
@@ -1154,7 +1168,7 @@ const selectAgentMode = (mode: 'quick-answer' | 'smart-reasoning') => {
   if (builtinAgent) {
     const notReadyReasons = getBuiltinAgentNotReadyReasons(builtinAgent, mode === 'smart-reasoning');
     if (notReadyReasons.length > 0) {
-      showBuiltinAgentNotReadyMessage(mode, notReadyReasons);
+      showAgentNotReadyMessage(builtinAgent, notReadyReasons);
       showAgentModeSelector.value = false;
       return;
     }
@@ -1175,26 +1189,18 @@ const handleSelectAgent = (agent: CustomAgent) => {
   // 根据智能体的 agent_mode 判断是否为 Agent 模式
   const isAgentType = agent.config?.agent_mode === 'smart-reasoning';
   
-  // 内置智能体检查 - 从实际的智能体配置来判断
-  if (agent.is_builtin) {
-    // 从 agents 列表中获取实际的内置智能体数据，如果没找到则使用传入的 agent (此时应该包含合并后的配置)
-    const builtinAgent = agents.value.find(a => a.id === agent.id) || agent;
-    if (builtinAgent) {
-      const notReadyReasons = getBuiltinAgentNotReadyReasons(builtinAgent, isAgentType);
-      if (notReadyReasons.length > 0) {
-        showBuiltinAgentNotReadyMessage(isAgentType ? 'smart-reasoning' : 'quick-answer', notReadyReasons);
-        return;
-      }
-    }
-  }
+  // 统一检查智能体是否就绪（内置和自定义智能体使用相同逻辑）
+  const actualAgent = agent.is_builtin 
+    ? (agents.value.find(a => a.id === agent.id) || agent)
+    : agent;
   
-  // 自定义智能体检查
-  if (!agent.is_builtin) {
-    const notReadyReasons = getCustomAgentNotReadyReasons(agent);
-    if (notReadyReasons.length > 0) {
-      showCustomAgentNotReadyMessage(agent, notReadyReasons);
-      return;
-    }
+  const notReadyReasons = agent.is_builtin
+    ? getBuiltinAgentNotReadyReasons(actualAgent, isAgentType)
+    : getCustomAgentNotReadyReasons(actualAgent);
+  
+  if (notReadyReasons.length > 0) {
+    showAgentNotReadyMessage(agent, notReadyReasons);
+    return;
   }
   
   selectedAgentId.value = agent.id;
@@ -1349,51 +1355,17 @@ const getCustomAgentNotReadyReasons = (agent: CustomAgent): string[] => {
   return reasons
 }
 
-// 显示自定义智能体未就绪的消息
-const showCustomAgentNotReadyMessage = (agent: CustomAgent, reasons: string[]) => {
+// 显示智能体未就绪的消息（统一处理内置和自定义智能体）
+const showAgentNotReadyMessage = (agent: CustomAgent, reasons: string[]) => {
   const reasonsText = reasons.join('、')
   
   const messageContent = h('div', { style: 'display: flex; flex-direction: column; gap: 8px; max-width: 320px;' }, [
-    h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.customAgentNotReadyDetail', { reasons: reasonsText })),
+    h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.agentNotReadyDetail', { agentName: agent.name, reasons: reasonsText })),
     h('a', {
       href: '#',
       onClick: (e: Event) => {
         e.preventDefault();
-        // 跳转到智能体编辑页面
         router.push(`/platform/agents?edit=${agent.id}`);
-      },
-      style: 'color: #07C05F; text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
-      onMouseenter: (e: Event) => {
-        (e.target as HTMLElement).style.textDecoration = 'underline';
-      },
-      onMouseleave: (e: Event) => {
-        (e.target as HTMLElement).style.textDecoration = 'none';
-      }
-    }, t('input.goToAgentEditor'))
-  ]);
-  
-  MessagePlugin.warning({
-    content: () => messageContent,
-    duration: 5000
-  });
-}
-
-// 显示内置智能体未就绪的消息
-const showBuiltinAgentNotReadyMessage = (mode: 'smart-reasoning' | 'quick-answer', reasons: string[]) => {
-  const agentName = mode === 'smart-reasoning' 
-    ? t('input.builtinAgentSettingName') 
-    : t('input.builtinNormalSettingName');
-  const builtinAgentId = mode === 'smart-reasoning' ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID;
-  const reasonsText = reasons.join('、')
-  
-  const messageContent = h('div', { style: 'display: flex; flex-direction: column; gap: 8px; max-width: 320px;' }, [
-    h('span', { style: 'color: #333; line-height: 1.5;' }, t('input.builtinAgentNotReadyDetail', { agentName, reasons: reasonsText })),
-    h('a', {
-      href: '#',
-      onClick: (e: Event) => {
-        e.preventDefault();
-        // 跳转到内置智能体编辑页面
-        router.push(`/platform/agents?edit=${builtinAgentId}`);
       },
       style: 'color: #07C05F; text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
       onMouseenter: (e: Event) => {

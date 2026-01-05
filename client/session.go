@@ -16,23 +16,6 @@ import (
 	"strings"
 )
 
-// SessionStrategy defines session strategy
-type SessionStrategy struct {
-	MaxRounds         int            `json:"max_rounds"`          // Maximum number of rounds to maintain
-	EnableRewrite     bool           `json:"enable_rewrite"`      // Enable query rewrite
-	FallbackStrategy  string         `json:"fallback_strategy"`   // Fallback strategy
-	FallbackResponse  string         `json:"fallback_response"`   // Fixed fallback response content
-	EmbeddingTopK     int            `json:"embedding_top_k"`     // Top K for vector retrieval
-	KeywordThreshold  float64        `json:"keyword_threshold"`   // Keyword retrieval threshold
-	VectorThreshold   float64        `json:"vector_threshold"`    // Vector retrieval threshold
-	RerankModelID     string         `json:"rerank_model_id"`     // Rerank model ID
-	RerankTopK        int            `json:"rerank_top_k"`        // Top K for reranking
-	RerankThreshold   float64        `json:"reranking_threshold"` // Reranking threshold
-	SummaryModelID    string         `json:"summary_model_id"`    // Summary model ID
-	SummaryParameters *SummaryConfig `json:"summary_parameters"`  // Summary model parameters
-	NoMatchPrefix     string         `json:"no_match_prefix"`     // Fallback response prefix
-}
-
 // SummaryConfig defines summary configuration
 type SummaryConfig struct {
 	MaxTokens           int     `json:"max_tokens"`
@@ -47,54 +30,25 @@ type SummaryConfig struct {
 	Temperature         float64 `json:"temperature"`
 	Seed                int     `json:"seed"`
 	MaxCompletionTokens int     `json:"max_completion_tokens"`
-}
-
-// SessionAgentConfig defines session-level agent configuration (matches server struct).
-// Sessions only store Enabled and KnowledgeBases; other configs are read from Tenant at runtime
-type SessionAgentConfig struct {
-	AgentModeEnabled bool     `json:"agent_mode_enabled"` // Whether agent mode is enabled for this session
-	WebSearchEnabled bool     `json:"web_search_enabled"` // Whether web search is enabled for this session
-	KnowledgeBases   []string `json:"knowledge_bases"`    // Accessible knowledge base IDs for this session
+	Thinking            *bool   `json:"thinking"`
 }
 
 // CreateSessionRequest session creation request
+// Sessions are now knowledge-base-independent and serve as conversation containers.
+// All configuration comes from custom agent at query time.
 type CreateSessionRequest struct {
-	KnowledgeBaseID string              `json:"knowledge_base_id"` // Associated knowledge base ID (optional in agent mode)
-	SessionStrategy *SessionStrategy    `json:"session_strategy"`  // Session strategy
-	AgentConfig     *SessionAgentConfig `json:"agent_config"`      // Agent configuration (optional, for agent mode)
-}
-
-// ContextConfig configures LLM context management
-type ContextConfig struct {
-	MaxTokens           int    `json:"max_tokens"`            // Maximum tokens allowed in LLM context
-	CompressionStrategy string `json:"compression_strategy"`  // Compression strategy: "sliding_window" or "smart"
-	RecentMessageCount  int    `json:"recent_message_count"`  // Number of recent messages to keep
-	SummarizeThreshold  int    `json:"summarize_threshold"`   // Number of messages before summarization
+	Title       string `json:"title"`       // Session title (optional)
+	Description string `json:"description"` // Session description (optional)
 }
 
 // Session session information
 type Session struct {
-	ID                string              `json:"id"`
-	TenantID          uint64              `json:"tenant_id"`
-	KnowledgeBaseID   string              `json:"knowledge_base_id"`
-	Title             string              `json:"title"`
-	Description       string              `json:"description"`
-	MaxRounds         int                 `json:"max_rounds"`
-	EnableRewrite     bool                `json:"enable_rewrite"`
-	FallbackStrategy  string              `json:"fallback_strategy"`
-	FallbackResponse  string              `json:"fallback_response"`
-	EmbeddingTopK     int                 `json:"embedding_top_k"`
-	KeywordThreshold  float64             `json:"keyword_threshold"`
-	VectorThreshold   float64             `json:"vector_threshold"`
-	RerankModelID     string              `json:"rerank_model_id"`
-	RerankTopK        int                 `json:"rerank_top_k"`
-	RerankThreshold   float64             `json:"rerank_threshold"` // Reranking threshold
-	SummaryModelID    string              `json:"summary_model_id"`
-	SummaryParameters *SummaryConfig      `json:"summary_parameters"`
-	AgentConfig       *SessionAgentConfig `json:"agent_config"`   // Agent configuration (optional)
-	ContextConfig     *ContextConfig      `json:"context_config"` // Context management configuration (optional)
-	CreatedAt         string              `json:"created_at"`
-	UpdatedAt         string              `json:"updated_at"`
+	ID          string `json:"id"`
+	TenantID    uint64 `json:"tenant_id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // SessionResponse session response
@@ -227,38 +181,66 @@ func (c *Client) GenerateTitle(ctx context.Context, sessionID string, request *G
 
 // KnowledgeQARequest knowledge Q&A request
 type KnowledgeQARequest struct {
-	Query string `json:"query"`
+	Query            string   `json:"query"`              // Query text for knowledge base search
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids"` // Selected knowledge base IDs for this request
+	KnowledgeIDs     []string `json:"knowledge_ids"`      // Selected knowledge IDs for this request
+	AgentEnabled     bool     `json:"agent_enabled"`      // Whether agent mode is enabled for this request
+	AgentID          string   `json:"agent_id"`           // Selected custom agent ID for this request
+	WebSearchEnabled bool     `json:"web_search_enabled"` // Whether web search is enabled for this request
+	SummaryModelID   string   `json:"summary_model_id"`   // Optional summary model ID (overrides session default)
+	DisableTitle     bool     `json:"disable_title"`      // Whether to disable auto title generation
+}
+
+// LLMToolCall represents a function/tool call from the LLM
+type LLMToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"` // "function"
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall represents the function details
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
 }
 
 type ResponseType string
 
 const (
-	ResponseTypeAnswer     ResponseType = "answer"
-	ResponseTypeReferences ResponseType = "references"
+	ResponseTypeAnswer       ResponseType = "answer"
+	ResponseTypeReferences   ResponseType = "references"
+	ResponseTypeThinking     ResponseType = "thinking"
+	ResponseTypeToolCall     ResponseType = "tool_call"
+	ResponseTypeToolResult   ResponseType = "tool_result"
+	ResponseTypeError        ResponseType = "error"
+	ResponseTypeReflection   ResponseType = "reflection"
+	ResponseTypeSessionTitle ResponseType = "session_title"
+	ResponseTypeAgentQuery   ResponseType = "agent_query"
+	ResponseTypeComplete     ResponseType = "complete"
 )
 
 // StreamResponse streaming response
 type StreamResponse struct {
-	ID                  string          `json:"id"`                   // Unique identifier
-	ResponseType        ResponseType    `json:"response_type"`        // Response type
-	Content             string          `json:"content"`              // Current content fragment
-	Done                bool            `json:"done"`                 // Whether completed
-	KnowledgeReferences []*SearchResult `json:"knowledge_references"` // Knowledge references
+	ID                  string                 `json:"id"`                             // Unique identifier
+	ResponseType        ResponseType           `json:"response_type"`                  // Response type
+	Content             string                 `json:"content"`                        // Current content fragment
+	Done                bool                   `json:"done"`                           // Whether completed
+	KnowledgeReferences []*SearchResult        `json:"knowledge_references,omitempty"` // Knowledge references
+	SessionID           string                 `json:"session_id,omitempty"`           // Session ID (for agent_query event)
+	AssistantMessageID  string                 `json:"assistant_message_id,omitempty"` // Assistant Message ID (for agent_query event)
+	ToolCalls           []LLMToolCall          `json:"tool_calls,omitempty"`           // Tool calls for streaming (partial)
+	Data                map[string]interface{} `json:"data,omitempty"`                 // Additional metadata for enhanced display
 }
 
 // KnowledgeQAStream knowledge Q&A streaming API
 func (c *Client) KnowledgeQAStream(
 	ctx context.Context,
 	sessionID string,
-	query string,
+	request *KnowledgeQARequest,
 	callback func(*StreamResponse) error,
 ) error {
 	path := fmt.Sprintf("/api/v1/knowledge-chat/%s", sessionID)
-	fmt.Printf("Starting KnowledgeQAStream request, session ID: %s, query: %s\n", sessionID, query)
-
-	request := &KnowledgeQARequest{
-		Query: query,
-	}
+	fmt.Printf("Starting KnowledgeQAStream request, session ID: %s, query: %s\n", sessionID, request.Query)
 
 	resp, err := c.doRequest(ctx, http.MethodPost, path, request, nil)
 	if err != nil {
@@ -423,10 +405,10 @@ func (c *Client) StopSession(ctx context.Context, sessionID string, messageID st
 
 // SearchKnowledgeRequest knowledge search request
 type SearchKnowledgeRequest struct {
-	Query            string   `json:"query"`                         // Query content
-	KnowledgeBaseID  string   `json:"knowledge_base_id,omitempty"`   // Single knowledge base ID (for backward compatibility)
-	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"`  // Knowledge base IDs (multi-KB support)
-	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"`       // Specific knowledge (file) IDs
+	Query            string   `json:"query"`                        // Query content
+	KnowledgeBaseID  string   `json:"knowledge_base_id,omitempty"`  // Single knowledge base ID (for backward compatibility)
+	KnowledgeBaseIDs []string `json:"knowledge_base_ids,omitempty"` // Knowledge base IDs (multi-KB support)
+	KnowledgeIDs     []string `json:"knowledge_ids,omitempty"`      // Specific knowledge (file) IDs
 }
 
 // SearchKnowledgeResponse search results response

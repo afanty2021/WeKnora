@@ -3067,6 +3067,14 @@ func (s *knowledgeService) executeFAQImport(ctx context.Context, taskID string, 
 				return fmt.Errorf("failed to delete chunk vectors: %w", err)
 			}
 			logger.Infof(ctx, "FAQ import task %s: deleted %d chunks (including updates)", taskID, len(chunksToDelete))
+
+			// 清理不再被引用的Tag
+			deletedTags, err := s.tagRepo.DeleteUnusedTags(ctx, tenantID, kb.ID)
+			if err != nil {
+				logger.Warnf(ctx, "FAQ import task %s: failed to cleanup unused tags: %v", taskID, err)
+			} else if deletedTags > 0 {
+				logger.Infof(ctx, "FAQ import task %s: cleaned up %d unused tags", taskID, deletedTags)
+			}
 		}
 	} else {
 		// Append模式：查询已存在的条目，跳过未变化的
@@ -6041,10 +6049,11 @@ func (s *knowledgeService) getOrCreateTagInTarget(
 }
 
 // SearchKnowledge searches knowledge items by keyword across the tenant
-func (s *knowledgeService) SearchKnowledge(ctx context.Context, keyword string, offset, limit int) ([]*types.Knowledge, bool, error) {
+// fileTypes: optional list of file extensions to filter by (e.g., ["csv", "xlsx"])
+func (s *knowledgeService) SearchKnowledge(ctx context.Context, keyword string, offset, limit int, fileTypes []string) ([]*types.Knowledge, bool, error) {
 	tenantID, ok := ctx.Value(types.TenantIDContextKey).(uint64)
 	if !ok {
 		return nil, false, werrors.NewUnauthorizedError("Tenant ID not found in context")
 	}
-	return s.repo.SearchKnowledge(ctx, tenantID, keyword, offset, limit)
+	return s.repo.SearchKnowledge(ctx, tenantID, keyword, offset, limit, fileTypes)
 }

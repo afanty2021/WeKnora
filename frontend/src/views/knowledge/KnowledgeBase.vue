@@ -46,10 +46,9 @@ let knowledgeScroll = ref()
 let page = 1;
 let pageSize = 35;
 
-const selectedTagId = ref<string>("");
+const selectedTagId = ref<string>("__untagged__");
 const tagList = ref<any[]>([]);
 const tagLoading = ref(false);
-const overallKnowledgeTotal = ref(0);
 const tagSearchQuery = ref('');
 const TAG_PAGE_SIZE = 50;
 const tagPage = ref(1);
@@ -60,6 +59,7 @@ let tagSearchDebounce: ReturnType<typeof setTimeout> | null = null;
 let docSearchDebounce: ReturnType<typeof setTimeout> | null = null;
 const docSearchKeyword = ref('');
 const selectedFileType = ref('');
+const UNTAGGED_TAG_ID = '__untagged__';
 const fileTypeOptions = computed(() => [
   { content: t('knowledgeBase.allFileTypes') || '全部类型', value: '' },
   { content: 'PDF', value: 'pdf' },
@@ -73,11 +73,13 @@ const fileTypeOptions = computed(() => [
 type TagInputInstance = ComponentPublicInstance<{ focus: () => void; select: () => void }>;
 const tagDropdownOptions = computed(() => {
   const options = [
-    { content: t('knowledgeBase.untagged') || '未分类', value: "" },
-    ...tagList.value.map((tag: any) => ({
-      content: tag.name,
-      value: tag.id,
-    })),
+    { content: t('knowledgeBase.untagged') || '未分类', value: UNTAGGED_TAG_ID },
+    ...tagList.value
+      .filter((tag: any) => tag.id !== UNTAGGED_TAG_ID)
+      .map((tag: any) => ({
+        content: tag.name,
+        value: tag.id,
+      })),
   ];
   return options;
 });
@@ -88,13 +90,7 @@ const tagMap = computed<Record<string, any>>(() => {
   });
   return map;
 });
-const sidebarCategoryCount = computed(() => tagList.value.length + 1);
-const assignedKnowledgeTotal = computed(() =>
-  tagList.value.reduce((sum, tag) => sum + (tag.knowledge_count || 0), 0),
-);
-const untaggedKnowledgeCount = computed(() => {
-  return Math.max(overallKnowledgeTotal.value - assignedKnowledgeTotal.value, 0);
-});
+const sidebarCategoryCount = computed(() => tagList.value.length);
 const filteredTags = computed(() => {
   const query = tagSearchQuery.value.trim().toLowerCase();
   if (!query) return tagList.value;
@@ -129,6 +125,7 @@ getPageSize()
 // 直接调用 API 获取知识库文件列表
 const getTagName = (tagId?: string | number) => {
   if (!tagId && tagId !== 0) return t('knowledgeBase.untagged') || '未分类';
+  if (tagId === UNTAGGED_TAG_ID) return t('knowledgeBase.untagged') || '未分类';
   const key = String(tagId);
   return tagMap.value[key]?.name || (t('knowledgeBase.untagged') || '未分类');
 };
@@ -252,8 +249,8 @@ const handleUntaggedClick = () => {
     editingTagId.value = null;
     editingTagName.value = '';
   }
-  if (selectedTagId.value === '') return;
-  handleTagFilterChange('');
+  if (selectedTagId.value === UNTAGGED_TAG_ID) return;
+  handleTagFilterChange(UNTAGGED_TAG_ID);
 };
 
 const startCreateTag = () => {
@@ -363,7 +360,7 @@ const confirmDeleteTag = (tag: any) => {
     .then(() => {
       MessagePlugin.success(t('knowledgeBase.tagDeleteSuccess'));
       if (selectedTagId.value === tag.id) {
-        handleTagFilterChange('');
+        handleTagFilterChange(UNTAGGED_TAG_ID);
       }
       loadTags(kbId.value);
       loadKnowledgeFiles(kbId.value);
@@ -375,7 +372,9 @@ const confirmDeleteTag = (tag: any) => {
 
 const handleKnowledgeTagChange = async (knowledgeId: string, tagValue: string) => {
   try {
-    await updateKnowledgeTagBatch({ updates: { [knowledgeId]: tagValue || null } });
+    // When selecting "untagged", pass null to clear the tag
+    const tagIdToUpdate = tagValue === UNTAGGED_TAG_ID ? null : (tagValue || null);
+    await updateKnowledgeTagBatch({ updates: { [knowledgeId]: tagIdToUpdate } });
     MessagePlugin.success(t('knowledgeBase.tagUpdateSuccess') || '分类已更新');
     loadKnowledgeFiles(kbId.value);
     loadTags(kbId.value);
@@ -393,16 +392,14 @@ const loadKnowledgeBaseInfo = async (targetKbId: string) => {
   try {
     const res: any = await getKnowledgeBaseById(targetKbId);
     kbInfo.value = res?.data || null;
-    selectedTagId.value = "";
+    selectedTagId.value = UNTAGGED_TAG_ID;
     if (!isFAQ.value) {
-      getKnowled({ page: 1, page_size: pageSize, tag_id: undefined }, targetKbId);
       loadKnowledgeFiles(targetKbId);
     } else {
       cardList.value = [];
       total.value = 0;
     }
     loadTags(targetKbId, true);
-    overallKnowledgeTotal.value = total.value;
   } catch (error) {
     console.error('Failed to load knowledge base info:', error);
     kbInfo.value = null;
@@ -437,12 +434,6 @@ watch(selectedTagId, (newVal, oldVal) => {
   if (oldVal === undefined) return
   if (newVal !== oldVal && kbId.value) {
     loadKnowledgeFiles(kbId.value);
-  }
-});
-
-watch(total, (val) => {
-  if (selectedTagId.value === '') {
-    overallKnowledgeTotal.value = val || 0;
   }
 });
 
@@ -857,7 +848,7 @@ const handleScroll = () => {
     if (scrollTop + clientHeight >= scrollHeight) {
       page++;
       if (cardList.value.length < total.value && page <= pageNum) {
-        getKnowled({ page, page_size: pageSize, tag_id: selectedTagId.value || undefined, keyword: docSearchKeyword.value ? docSearchKeyword.value.trim() : undefined, file_type: selectedFileType.value || undefined });
+        getKnowled({ page, page_size: pageSize, tag_id: selectedTagId.value, keyword: docSearchKeyword.value ? docSearchKeyword.value.trim() : undefined, file_type: selectedFileType.value || undefined });
       }
     }
   }
@@ -1008,17 +999,6 @@ async function createNewSession(value: string): Promise<void> {
           </div>
           <t-loading :loading="tagLoading" size="small">
             <div class="tag-list">
-              <div
-                class="tag-list-item"
-                :class="{ active: selectedTagId === '' }"
-                @click="handleUntaggedClick"
-              >
-                <div class="tag-list-left">
-                  <t-icon name="folder" size="18px" />
-                  <span>{{ $t('knowledgeBase.untagged') || '未分类' }}</span>
-                </div>
-                <span class="tag-count">{{ untaggedKnowledgeCount }}</span>
-              </div>
               <div v-if="creatingTag" class="tag-list-item tag-editing" @click.stop>
                 <div class="tag-list-left">
                   <t-icon name="folder" size="18px" />
@@ -1062,12 +1042,16 @@ async function createNewSession(value: string): Promise<void> {
                   v-for="tag in filteredTags"
                   :key="tag.id"
                   class="tag-list-item"
-                  :class="{ active: selectedTagId === tag.id, editing: editingTagId === tag.id }"
-                  @click="handleTagRowClick(tag.id)"
+                  :class="{ active: selectedTagId === tag.id, editing: editingTagId === tag.id && tag.id !== UNTAGGED_TAG_ID }"
+                  @click="tag.id === UNTAGGED_TAG_ID ? handleUntaggedClick() : handleTagRowClick(tag.id)"
                 >
                   <div class="tag-list-left">
                     <t-icon name="folder" size="18px" />
-                    <template v-if="editingTagId === tag.id">
+                    <!-- Untagged pseudo-tag: show translated name, no editing -->
+                    <template v-if="tag.id === UNTAGGED_TAG_ID">
+                      <span class="tag-name">{{ $t('knowledgeBase.untagged') || '未分类' }}</span>
+                    </template>
+                    <template v-else-if="editingTagId === tag.id">
                       <div class="tag-edit-input" @click.stop>
                         <t-input
                           :ref="setEditingTagInputRefByTag(tag.id)"
@@ -1085,46 +1069,54 @@ async function createNewSession(value: string): Promise<void> {
                   </div>
                   <div class="tag-list-right">
                     <span class="tag-count">{{ tag.knowledge_count || 0 }}</span>
-                    <div v-if="editingTagId === tag.id" class="tag-inline-actions" @click.stop>
-                      <t-button
-                        variant="text"
-                        theme="default"
-                        size="small"
-                        class="tag-action-btn confirm"
-                        :loading="editingTagSubmitting"
-                        @click.stop="submitEditTag"
-                      >
-                        <t-icon name="check" size="16px" />
-                      </t-button>
-                      <t-button
-                        variant="text"
-                        theme="default"
-                        size="small"
-                        class="tag-action-btn cancel"
-                        @click.stop="cancelEditTag"
-                      >
-                        <t-icon name="close" size="16px" />
-                      </t-button>
-                    </div>
-                    <div v-else class="tag-more" @click.stop>
-                      <t-popup trigger="click" placement="top-right" overlayClassName="tag-more-popup">
-                        <div class="tag-more-btn">
-                          <t-icon name="more" size="14px" />
-                        </div>
-                        <template #content>
-                          <div class="tag-menu">
-                            <div class="tag-menu-item" @click="startEditTag(tag)">
-                              <t-icon class="menu-icon" name="edit" />
-                              <span>{{ $t('knowledgeBase.tagEditAction') }}</span>
-                            </div>
-                            <div class="tag-menu-item danger" @click="confirmDeleteTag(tag)">
-                              <t-icon class="menu-icon" name="delete" />
-                              <span>{{ $t('knowledgeBase.tagDeleteAction') }}</span>
-                            </div>
+                    <!-- Untagged pseudo-tag: no edit/delete actions -->
+                    <template v-if="tag.id === UNTAGGED_TAG_ID">
+                      <!-- Empty placeholder for alignment -->
+                    </template>
+                    <template v-else-if="editingTagId === tag.id">
+                      <div class="tag-inline-actions" @click.stop>
+                        <t-button
+                          variant="text"
+                          theme="default"
+                          size="small"
+                          class="tag-action-btn confirm"
+                          :loading="editingTagSubmitting"
+                          @click.stop="submitEditTag"
+                        >
+                          <t-icon name="check" size="16px" />
+                        </t-button>
+                        <t-button
+                          variant="text"
+                          theme="default"
+                          size="small"
+                          class="tag-action-btn cancel"
+                          @click.stop="cancelEditTag"
+                        >
+                          <t-icon name="close" size="16px" />
+                        </t-button>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div class="tag-more" @click.stop>
+                        <t-popup trigger="click" placement="top-right" overlayClassName="tag-more-popup">
+                          <div class="tag-more-btn">
+                            <t-icon name="more" size="14px" />
                           </div>
-                        </template>
-                      </t-popup>
-                    </div>
+                          <template #content>
+                            <div class="tag-menu">
+                              <div class="tag-menu-item" @click="startEditTag(tag)">
+                                <t-icon class="menu-icon" name="edit" />
+                                <span>{{ $t('knowledgeBase.tagEditAction') }}</span>
+                              </div>
+                              <div class="tag-menu-item danger" @click="confirmDeleteTag(tag)">
+                                <t-icon class="menu-icon" name="delete" />
+                                <span>{{ $t('knowledgeBase.tagDeleteAction') }}</span>
+                              </div>
+                            </div>
+                          </template>
+                        </t-popup>
+                      </div>
+                    </template>
                   </div>
                 </div>
               </template>
