@@ -39,6 +39,18 @@ const (
 	ProviderMiniMax ProviderName = "minimax"
 	// 小米 Mimo
 	ProviderMimo ProviderName = "mimo"
+	// GPUStack (私有化部署)
+	ProviderGPUStack ProviderName = "gpustack"
+	// 月之暗面 Moonshot (Kimi)
+	ProviderMoonshot ProviderName = "moonshot"
+	// 魔搭 ModelScope
+	ProviderModelScope ProviderName = "modelscope"
+	// 百度千帆
+	ProviderQianfan ProviderName = "qianfan"
+	// 七牛云
+	ProviderQiniu ProviderName = "qiniu"
+	// 美团 LongCat AI
+	ProviderLongCat ProviderName = "longcat"
 )
 
 // AllProviders 返回所有注册的提供者名称
@@ -52,11 +64,17 @@ func AllProviders() []ProviderName {
 		ProviderSiliconFlow,
 		ProviderDeepSeek,
 		ProviderMiniMax,
+		ProviderMoonshot,
+		ProviderModelScope,
+		ProviderQianfan,
+		ProviderQiniu,
 		ProviderOpenAI,
 		ProviderGemini,
 		ProviderOpenRouter,
 		ProviderJina,
 		ProviderMimo,
+		ProviderLongCat,
+		ProviderGPUStack,
 	}
 }
 
@@ -208,6 +226,18 @@ func DetectProvider(baseURL string) ProviderName {
 		return ProviderMiniMax
 	case containsAny(baseURL, "xiaomimimo.com"):
 		return ProviderMimo
+	case containsAny(baseURL, "gpustack"):
+		return ProviderGPUStack
+	case containsAny(baseURL, "modelscope.cn"):
+		return ProviderModelScope
+	case containsAny(baseURL, "qiniuapi.com", "qiniu"):
+		return ProviderQiniu
+	case containsAny(baseURL, "moonshot.ai"):
+		return ProviderMoonshot
+	case containsAny(baseURL, "qianfan.baidubce.com", "baidubce.com"):
+		return ProviderQianfan
+	case containsAny(baseURL, "longcat.chat"):
+		return ProviderLongCat
 	default:
 		return ProviderGeneric
 	}

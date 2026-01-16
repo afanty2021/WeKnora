@@ -39,6 +39,7 @@ export default {
     tagEditSuccess: 'Tag updated',
     tagDeleteTitle: 'Delete tag',
     tagDeleteDesc: 'Delete tag "{name}"? All FAQ entries under this tag will also be deleted.',
+    tagDeleteDescDoc: 'Delete tag "{name}"? All documents under this tag will also be deleted.',
     tagDeleteSuccess: 'Tag deleted',
     tagEditAction: 'Rename',
     tagDeleteAction: 'Delete',
@@ -1114,6 +1115,7 @@ export default {
       questionIndexModeDescription: 'Combined: Standard and similar questions are indexed together. Separate: Each question is indexed independently for more precise retrieval but requires more storage.',
       entryGuide: 'Each FAQ entry contains a primary question, similar questions, negative examples, and multiple answers. Manage them in the FAQ knowledge base detail view.',
       tagDesc: 'Select category for FAQ entries',
+      tagPlaceholder: 'Please select a category',
       modes: {
         questionOnly: 'Questions only',
         questionAnswer: 'Question + answer',
@@ -1653,7 +1655,7 @@ export default {
           description: 'qwen-plus, tongyi-embedding-vision-plus, qwen3-rerank, etc.',
         },
         zhipu: {
-          label: 'Zhipu AI',
+          label: 'Zhipu BigModel',
           description: 'glm-4.7, embedding-3, rerank, etc.',
         },
         openrouter: {
@@ -1661,7 +1663,7 @@ export default {
           description: 'openai/gpt-5.2-chat, google/gemini-3-flash-preview, etc.',
         },
         generic: {
-          label: 'Custom API',
+          label: 'Custom (OpenAI-compatible)',
           description: 'Generic API endpoint',
         },
         siliconflow: {
@@ -1669,7 +1671,7 @@ export default {
           description: 'deepseek-ai/DeepSeek-V3.1, etc.',
         },
         jina: {
-          label: 'Jina AI',
+          label: 'Jina',
           description: 'jina-clip-v1, jina-embeddings-v2-base-zh, etc.',
         },
         volcengine: {
@@ -1695,6 +1697,30 @@ export default {
         gemini: {
           label: 'Google Gemini',
           description: 'gemini-3-flash-preview, gemini-2.5-pro, etc.',
+        },
+        gpustack: {
+          label: 'GPUStack',
+          description: 'Choose your deployed model on GPUStack',
+        },
+        modelscope: {
+          label: 'ModelScope',
+          description: 'Qwen/Qwen3-8B, Qwen/Qwen3-Embedding-8B, etc.',
+        },
+        qiniu: {
+          label: 'Qiniu Cloud',
+          description: 'deepseek/deepseek-v3.2-251201, z-ai/glm-4.7, etc.',
+        },
+        moonshot: {
+          label: 'Moonshot',
+          description: 'kimi-k2-turbo-preview, moonshot-v1-8k-vision-preview, etc.',
+        },
+        qianfan: {
+          label: 'Baidu Qianfan',
+          description: 'ernie-5.0-thinking-preview, embedding-v1, bce-reranker-base, etc.',
+        },
+        longcat: {
+          label: 'LongCat AI',
+          description: 'LongCat-Flash-Chat, LongCat-Flash-Thinking, etc.',
         },
       },
     }

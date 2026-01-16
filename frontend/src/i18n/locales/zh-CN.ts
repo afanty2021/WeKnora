@@ -39,6 +39,7 @@ export default {
     tagEditSuccess: "标签更新成功",
     tagDeleteTitle: "删除标签",
     tagDeleteDesc: '确定删除标签"{name}"？该标签下的所有 FAQ 条目将被一并删除',
+    tagDeleteDescDoc: '确定删除标签"{name}"？该标签下的所有文档将被一并删除',
     tagDeleteSuccess: "标签已删除",
     tagEditAction: "重命名",
     tagDeleteAction: "删除",
@@ -1181,31 +1182,79 @@ export default {
       providers: {
         openai: {
           label: "OpenAI",
-          description: "OpenAI 官方 API",
+          description: "gpt-5.2, gpt-5-mini, etc.",
         },
         aliyun: {
           label: "阿里云 DashScope",
-          description: "支持 Qwen、DeepSeek 等模型",
+          description: "qwen-plus, tongyi-embedding-vision-plus, qwen3-rerank, etc.",
         },
         zhipu: {
-          label: "智谱 AI",
-          description: "支持 GLM-4 系列模型",
+          label: "智谱 BigModel",
+          description: "glm-4.7, embedding-3, rerank, etc.",
         },
         openrouter: {
           label: "OpenRouter",
-          description: "多模型聚合平台",
+          description: "openai/gpt-5.2-chat, google/gemini-3-flash-preview, etc.",
         },
         generic: {
-          label: "自定义 API",
-          description: "OpenAI 兼容的自定义端点",
+          label: "自定义 (OpenAI兼容接口)",
+          description: "Generic API endpoint (OpenAI-compatible)",
         },
         siliconflow: {
-          label: "SiliconFlow",
-          description: "硅基流动，支持多种模型",
+          label: "硅基流动 SiliconFlow",
+          description: "deepseek-ai/DeepSeek-V3.1, etc.",
         },
         jina: {
-          label: "Jina AI",
-          description: "专注于 Embedding 和 Rerank",
+          label: "Jina",
+          description: "jina-clip-v1, jina-embeddings-v2-base-zh, etc.",
+        },
+        volcengine: {
+          label: "火山引擎 Volcengine",
+          description: "doubao-1-5-pro-32k-250115, doubao-embedding-vision-250615, etc.",
+        },
+        deepseek: {
+          label: "DeepSeek",
+          description: "deepseek-chat, deepseek-reasoner 等",
+        },
+        hunyuan: {
+          label: "腾讯混元 Hunyuan",
+          description: "hunyuan-pro, hunyuan-standard, hunyuan-embedding, etc.",
+        },
+        minimax: {
+          label: "MiniMax",
+          description: "MiniMax-M2.1, MiniMax-M2.1-lightning 等",
+        },
+        mimo: {
+          label: "小米 MiMo",
+          description: "mimo-v2-flash",
+        },
+        gemini: {
+          label: "Google Gemini",
+          description: "gemini-3-flash-preview, gemini-2.5-pro 等",
+        },
+        gpustack: {
+          label: "GPUStack",
+          description: "Choose your deployed model on GPUStack",
+        },
+        modelscope: {
+          label: "魔搭 ModelScope",
+          description: "Qwen/Qwen3-8B, Qwen/Qwen3-Embedding-8B, etc.",
+        },
+        qiniu: {
+          label: "七牛云 Qiniu",
+          description: "deepseek/deepseek-v3.2-251201, z-ai/glm-4.7, etc.",
+        },
+        moonshot: {
+          label: "月之暗面 Moonshot",
+          description: "kimi-k2-turbo-preview, moonshot-v1-8k-vision-preview, etc.",
+        },
+        qianfan: {
+          label: "百度千帆 Baidu Cloud",
+          description: "ernie-5.0-thinking-preview, embedding-v1, bce-reranker-base, etc.",
+        },
+        longcat: {
+          label: "LongCat AI",
+          description: "LongCat-Flash-Chat, LongCat-Flash-Thinking, etc.",
         },
       },
     },
@@ -1463,6 +1512,7 @@ export default {
       questionIndexModeDescription: "合并索引：标准问和相似问合并索引；分别索引：标准问和每个相似问独立索引，检索更精确但需要更多存储",
       entryGuide: "FAQ 条目由标准问、相似问、反例和多个答案组成，可在知识库详情中批量导入、编辑。",
       tagDesc: "为 FAQ 条目选择分类",
+      tagPlaceholder: "请选择分类",
       modes: {
         questionOnly: "仅标准问/相似问",
         questionAnswer: "标准问 + 答案",

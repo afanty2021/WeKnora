@@ -38,6 +38,7 @@ export default {
     tagEditSuccess: 'Тег обновлён',
     tagDeleteTitle: 'Удаление тега',
     tagDeleteDesc: 'Удалить тег «{name}»? Все записи FAQ под этим тегом также будут удалены.',
+    tagDeleteDescDoc: 'Удалить тег «{name}»? Все документы под этим тегом также будут удалены.',
     tagDeleteSuccess: 'Тег удалён',
     tagEditAction: 'Переименовать',
     tagDeleteAction: 'Удалить',
@@ -904,7 +905,7 @@ export default {
           description: 'qwen-plus, tongyi-embedding-vision-plus, qwen3-rerank, etc.',
         },
         zhipu: {
-          label: 'Zhipu AI',
+          label: 'Zhipu BigModel',
           description: 'glm-4.7, embedding-3, rerank, etc.',
         },
         openrouter: {
@@ -912,7 +913,7 @@ export default {
           description: 'openai/gpt-5.2-chat, google/gemini-3-flash-preview, etc.',
         },
         generic: {
-          label: 'Пользовательский API',
+          label: 'Пользовательский (OpenAI-совместимый)',
           description: 'Generic API endpoint',
         },
         siliconflow: {
@@ -920,7 +921,7 @@ export default {
           description: 'deepseek-ai/DeepSeek-V3.1, etc.',
         },
         jina: {
-          label: 'Jina AI',
+          label: 'Jina',
           description: 'jina-clip-v1, jina-embeddings-v2-base-zh, etc.',
         },
         volcengine: {
@@ -946,6 +947,30 @@ export default {
         gemini: {
           label: 'Google Gemini',
           description: 'gemini-3-flash-preview, gemini-2.5-pro, etc.',
+        },
+        gpustack: {
+          label: 'GPUStack',
+          description: 'Choose your deployed model on GPUStack',
+        },
+        modelscope: {
+          label: 'ModelScope',
+          description: 'Qwen/Qwen3-8B, Qwen/Qwen3-Embedding-8B, etc.',
+        },
+        qiniu: {
+          label: 'Qiniu Cloud',
+          description: 'deepseek/deepseek-v3.2-251201, z-ai/glm-4.7, etc.',
+        },
+        moonshot: {
+          label: 'Moonshot',
+          description: 'kimi-k2-turbo-preview, moonshot-v1-8k-vision-preview, etc.',
+        },
+        qianfan: {
+          label: 'Baidu Qianfan',
+          description: 'ernie-5.0-thinking-preview, embedding-v1, bce-reranker-base, etc.',
+        },
+        longcat: {
+          label: 'LongCat AI',
+          description: 'LongCat-Flash-Chat, LongCat-Flash-Thinking, etc.',
         },
       },
     }
@@ -1056,6 +1081,7 @@ export default {
       questionIndexModeDescription: 'Объединенная: стандартные и похожие вопросы индексируются вместе. Раздельная: каждый вопрос индексируется независимо для более точного поиска, но требует больше места.',
       entryGuide: 'Каждый FAQ включает основной вопрос, похожие вопросы, негативные примеры и несколько ответов. Управляйте ими в деталях FAQ-базы.',
       tagDesc: 'Выберите категорию для записей FAQ',
+      tagPlaceholder: 'Пожалуйста, выберите категорию',
       modes: {
         questionOnly: 'Только вопросы',
         questionAnswer: 'Вопрос + ответ',

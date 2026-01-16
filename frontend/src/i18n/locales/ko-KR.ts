@@ -38,6 +38,7 @@ export default {
     tagEditSuccess: "태그 업데이트 성공",
     tagDeleteTitle: "태그 삭제",
     tagDeleteDesc: '"{name}" 태그를 삭제하시겠습니까? 해당 태그의 모든 FAQ 항목이 함께 삭제됩니다',
+    tagDeleteDescDoc: '"{name}" 태그를 삭제하시겠습니까? 해당 태그의 모든 문서가 함께 삭제됩니다',
     tagDeleteSuccess: "태그가 삭제되었습니다",
     tagEditAction: "이름 변경",
     tagDeleteAction: "삭제",
@@ -983,6 +984,87 @@ export default {
         baseUrlEmpty: "Base URL은 비워둘 수 없습니다",
         baseUrlInvalid: "Base URL 형식이 올바르지 않습니다. 유효한 URL을 입력해주세요",
       },
+      // Provider related translations
+      providerLabel: "제공업체",
+      providerPlaceholder: "모델 제공업체 선택",
+      providers: {
+        openai: {
+          label: "OpenAI",
+          description: "gpt-5.2, gpt-5-mini 등",
+        },
+        aliyun: {
+          label: "Aliyun DashScope",
+          description: "qwen-plus, tongyi-embedding-vision-plus, qwen3-rerank 등",
+        },
+        zhipu: {
+          label: "Zhipu BigModel",
+          description: "glm-4.7, embedding-3, rerank, etc.",
+        },
+        openrouter: {
+          label: "OpenRouter",
+          description: "openai/gpt-5.2-chat, google/gemini-3-flash-preview 등",
+        },
+        generic: {
+          label: "사용자 정의 (OpenAI 호환)",
+          description: "Generic API endpoint",
+        },
+        siliconflow: {
+          label: "SiliconFlow",
+          description: "deepseek-ai/DeepSeek-V3.1 등",
+        },
+        jina: {
+          label: "Jina",
+          description: "jina-clip-v1, jina-embeddings-v2-base-zh, etc.",
+        },
+        volcengine: {
+          label: "Volcengine",
+          description: "doubao-1-5-pro-32k-250115, doubao-embedding-vision-250615 등",
+        },
+        deepseek: {
+          label: "DeepSeek",
+          description: "deepseek-chat, deepseek-reasoner 등",
+        },
+        hunyuan: {
+          label: "Hunyuan",
+          description: "hunyuan-pro, hunyuan-standard, hunyuan-embedding 등",
+        },
+        minimax: {
+          label: "MiniMax",
+          description: "MiniMax-M2.1, MiniMax-M2.1-lightning 등",
+        },
+        mimo: {
+          label: "MiMo",
+          description: "mimo-v2-flash",
+        },
+        gemini: {
+          label: "Google Gemini",
+          description: "gemini-3-flash-preview, gemini-2.5-pro 등",
+        },
+        gpustack: {
+          label: "GPUStack",
+          description: "Choose your deployed model on GPUStack",
+        },
+        modelscope: {
+          label: "ModelScope",
+          description: "Qwen/Qwen3-8B, Qwen/Qwen3-Embedding-8B, etc.",
+        },
+        qiniu: {
+          label: "Qiniu Cloud",
+          description: "deepseek/deepseek-v3.2-251201, z-ai/glm-4.7, etc.",
+        },
+        moonshot: {
+          label: "Moonshot",
+          description: "kimi-k2-turbo-preview, moonshot-v1-8k-vision-preview, etc.",
+        },
+        qianfan: {
+          label: "Baidu Qianfan",
+          description: "ernie-5.0-thinking-preview, embedding-v1, bce-reranker-base, etc.",
+        },
+        longcat: {
+          label: "LongCat AI",
+          description: "LongCat-Flash-Chat, LongCat-Flash-Thinking, etc.",
+        },
+      },
     },
   },
   language: {
@@ -1155,9 +1237,9 @@ export default {
     messages: {
       deleted: "삭제됨",
       deleteFailed: "삭제 실패",
-    file: "파일",
-    knowledgeBase: "지식베이스",
-    noResult: "결과 없음",
+      file: "파일",
+      knowledgeBase: "지식베이스",
+      noResult: "결과 없음",
     },
     features: {
       knowledgeGraph: "지식 그래프 활성화됨",
@@ -1238,6 +1320,7 @@ export default {
       questionIndexModeDescription: "병합 인덱스: 표준 질문과 유사 질문을 병합 인덱싱; 개별 인덱스: 표준 질문과 각 유사 질문을 독립적으로 인덱싱하여 더 정확하게 검색하지만 더 많은 저장 공간이 필요합니다",
       entryGuide: "FAQ 항목은 표준 질문, 유사 질문, 반례 및 여러 답변으로 구성됩니다. 지식베이스 세부 정보에서 일괄 가져오기 및 편집할 수 있습니다.",
       tagDesc: "FAQ 항목에 분류 선택",
+      tagPlaceholder: "분류를 선택하세요",
       modes: {
         questionOnly: "표준 질문/유사 질문만",
         questionAnswer: "표준 질문 + 답변",
