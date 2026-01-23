@@ -203,6 +203,11 @@ func (s *sessionService) DeleteSession(ctx context.Context, id string) error {
 		logger.Warnf(ctx, "Failed to cleanup temporary KB for session %s: %v", id, err)
 	}
 
+	// Cleanup conversation context stored in Redis for this session
+	if err := s.sessionStorage.Delete(ctx, id); err != nil {
+		logger.Warnf(ctx, "Failed to cleanup conversation context for session %s: %v", id, err)
+	}
+
 	// Delete session from repository
 	err := s.sessionRepo.Delete(ctx, tenantID, id)
 	if err != nil {
@@ -486,6 +491,12 @@ func (s *sessionService) KnowledgeQA(
 		if customAgent.Config.MaxCompletionTokens > 0 {
 			summaryConfig.MaxCompletionTokens = customAgent.Config.MaxCompletionTokens
 			logger.Infof(ctx, "Using custom agent's max_completion_tokens: %d", customAgent.Config.MaxCompletionTokens)
+		}
+		// Override thinking mode from agent config
+		// Agent-level thinking setting takes full control (no global fallback)
+		summaryConfig.Thinking = customAgent.Config.Thinking
+		if customAgent.Config.Thinking != nil {
+			logger.Infof(ctx, "Using custom agent's thinking: %v", *customAgent.Config.Thinking)
 		}
 		// Override retrieval strategy settings
 		if customAgent.Config.EmbeddingTopK > 0 {
@@ -1104,6 +1115,7 @@ func (s *sessionService) AgentQA(
 		HistoryTurns:        customAgent.Config.HistoryTurns,
 		MCPSelectionMode:    customAgent.Config.MCPSelectionMode,
 		MCPServices:         customAgent.Config.MCPServices,
+		Thinking:            customAgent.Config.Thinking,
 	}
 
 	// Resolve knowledge bases: request-level @ mentions take priority over agent config
