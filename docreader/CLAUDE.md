@@ -149,6 +149,8 @@ service DocReader {
 2. **工具集成解析器**
    - `MarkItDown`: 通用文档解析
    - `MinerU`: 高级版式分析
+     - `StdMinerUParser`: 标准本地 MinerU 解析器
+     - `MinerUCloudParser`: MinerU 云服务解析器（v0.2.10+ 新增分离实现）
    - OCR 引擎: 图像文字识别
 
 3. **复合解析器**
@@ -277,4 +279,6 @@ A: 在 `ocr_engine.py` 中配置 OCR 提供商（如 Tesseract、PaddleOCR）。
 - `utils/split.py`: 文本分割工具
 
 ## 变更记录 (Changelog)
+- 2026-01-23: v0.2.10+ 更新
+  - 新增 MinerU 解析器分离实现说明（StdMinerUParser 和 MinerUCloudParser）
 - 2025-12-05: 初始化 docreader 模块文档
