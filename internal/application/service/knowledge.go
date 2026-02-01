@@ -4937,16 +4937,18 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 		return []*types.FAQEntry{}, nil
 	}
 
-	// Extract chunk IDs and build score/match type maps
+	// Extract chunk IDs and build score/match type/matched content maps
 	chunkIDs := make([]string, 0, len(searchResults))
 	chunkScores := make(map[string]float64)
 	chunkMatchTypes := make(map[string]types.MatchType)
+	chunkMatchedContents := make(map[string]string)
 	for _, result := range searchResults {
 		// SearchResult.ID is the chunk ID
 		chunkID := result.ID
 		chunkIDs = append(chunkIDs, chunkID)
 		chunkScores[chunkID] = result.Score
 		chunkMatchTypes[chunkID] = result.MatchType
+		chunkMatchedContents[chunkID] = result.MatchedContent
 	}
 
 	// Batch fetch chunks
@@ -5001,6 +5003,11 @@ func (s *knowledgeService) SearchFAQEntries(ctx context.Context,
 		}
 		if matchType, ok := chunkMatchTypes[chunk.ID]; ok {
 			entry.MatchType = matchType
+		}
+
+		// Set MatchedQuestion from search result's matched content
+		if matchedContent, ok := chunkMatchedContents[chunk.ID]; ok && matchedContent != "" {
+			entry.MatchedQuestion = matchedContent
 		}
 
 		entries = append(entries, entry)
@@ -6382,7 +6389,16 @@ func (s *knowledgeService) ProcessDocument(ctx context.Context, t *asynq.Task) e
 	// 处理不同类型的导入：文件、URL、文本段落
 	var chunks []*proto.Chunk
 	if payload.URL != "" {
-		// URL导入
+		// URL导入 - 再次进行 SSRF 验证（防止 DNS 重绑定攻击）
+		if safe, reason := secutils.IsSSRFSafeURL(payload.URL); !safe {
+			logger.Errorf(ctx, "URL rejected for SSRF protection in ProcessDocument: %s, reason: %s", payload.URL, reason)
+			knowledge.ParseStatus = "failed"
+			knowledge.ErrorMessage = "URL is not allowed for security reasons"
+			knowledge.UpdatedAt = time.Now()
+			s.repo.UpdateKnowledge(ctx, knowledge)
+			return nil
+		}
+
 		urlResp, err := s.docReaderClient.ReadFromURL(ctx, &proto.ReadFromURLRequest{
 			Url:   payload.URL,
 			Title: knowledge.Title,
