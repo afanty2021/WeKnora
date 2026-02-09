@@ -21,6 +21,11 @@ export interface CustomAgentConfig {
   mcp_selection_mode?: 'all' | 'selected' | 'none';
   mcp_services?: string[];          // 选择的MCP服务ID列表
 
+  // ===== Skills设置（仅Agent模式）=====
+  // Skills选择模式：all=全部预装, selected=指定, none=不使用
+  skills_selection_mode?: 'all' | 'selected' | 'none';
+  selected_skills?: string[];       // 选择的Skill名称列表
+
   // ===== 知识库设置 =====
   // 知识库选择模式：all=全部知识库, selected=指定知识库, none=不使用知识库
   kb_selection_mode?: 'all' | 'selected' | 'none';
@@ -108,8 +113,9 @@ export const BUILTIN_AGENT_NORMAL_ID = BUILTIN_QUICK_ANSWER_ID;
 export const BUILTIN_AGENT_AGENT_ID = BUILTIN_SMART_REASONING_ID;
 
 // 获取智能体列表（包括内置智能体）
+// disabled_own_agent_ids: 当前租户在对话下拉中停用的「我的」智能体 ID，仅影响本租户
 export function listAgents() {
-  return get<{ data: CustomAgent[] }>('/api/v1/agents');
+  return get<{ data: CustomAgent[]; disabled_own_agent_ids?: string[] }>('/api/v1/agents');
 }
 
 // 获取智能体详情

@@ -32,6 +32,22 @@ type KnowledgeBaseService interface {
 	//   - Possible errors such as not existing, insufficient permissions, etc.
 	GetKnowledgeBaseByID(ctx context.Context, id string) (*types.KnowledgeBase, error)
 
+	// GetKnowledgeBaseByIDOnly retrieves knowledge base by ID without tenant filter
+	// Used for cross-tenant shared KB access where permission is checked elsewhere
+	// Parameters:
+	//   - ctx: Context information
+	//   - id: Unique identifier of the knowledge base
+	// Returns:
+	//   - Knowledge base object, if found
+	//   - Possible errors such as not existing, etc.
+	GetKnowledgeBaseByIDOnly(ctx context.Context, id string) (*types.KnowledgeBase, error)
+
+	// GetKnowledgeBasesByIDsOnly retrieves knowledge bases by IDs without tenant filter (batch).
+	GetKnowledgeBasesByIDsOnly(ctx context.Context, ids []string) ([]*types.KnowledgeBase, error)
+
+	// FillKnowledgeBaseCounts fills KnowledgeCount, ChunkCount, IsProcessing, ProcessingCount for the given KB (uses kb.TenantID).
+	FillKnowledgeBaseCounts(ctx context.Context, kb *types.KnowledgeBase) error
+
 	// ListKnowledgeBases lists all knowledge bases under the current tenant
 	// Parameters:
 	//   - ctx: Context information, containing tenant information
@@ -39,6 +55,8 @@ type KnowledgeBaseService interface {
 	//   - List of knowledge base objects
 	//   - Possible errors such as insufficient permissions, etc.
 	ListKnowledgeBases(ctx context.Context) ([]*types.KnowledgeBase, error)
+	// ListKnowledgeBasesByTenantID lists all knowledge bases for a specific tenant (e.g. for shared agent context).
+	ListKnowledgeBasesByTenantID(ctx context.Context, tenantID uint64) ([]*types.KnowledgeBase, error)
 
 	// UpdateKnowledgeBase updates knowledge base information
 	// Parameters:
@@ -119,6 +137,17 @@ type KnowledgeBaseRepository interface {
 	//   - Knowledge base object, if found
 	//   - Possible errors such as record not existing, database errors, etc.
 	GetKnowledgeBaseByID(ctx context.Context, id string) (*types.KnowledgeBase, error)
+
+	// GetKnowledgeBaseByIDAndTenant queries a knowledge base by ID scoped to a tenant.
+	// Returns ErrKnowledgeBaseNotFound if the KB does not exist or does not belong to the tenant.
+	// Parameters:
+	//   - ctx: Context information
+	//   - id: Knowledge base ID
+	//   - tenantID: Tenant ID (enforces tenant isolation)
+	// Returns:
+	//   - Knowledge base object, if found and owned by tenant
+	//   - Possible errors such as record not existing or wrong tenant, database errors, etc.
+	GetKnowledgeBaseByIDAndTenant(ctx context.Context, id string, tenantID uint64) (*types.KnowledgeBase, error)
 
 	// GetKnowledgeBaseByIDs queries knowledge bases by multiple IDs
 	// Parameters:

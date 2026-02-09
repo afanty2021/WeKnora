@@ -111,6 +111,10 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(neo4jRepo.NewNeo4jRepository))
 	must(container.Provide(repository.NewMCPServiceRepository))
 	must(container.Provide(repository.NewCustomAgentRepository))
+	must(container.Provide(repository.NewOrganizationRepository))
+	must(container.Provide(repository.NewKBShareRepository))
+	must(container.Provide(repository.NewAgentShareRepository))
+	must(container.Provide(repository.NewTenantDisabledSharedAgentRepository))
 	must(container.Provide(service.NewWebSearchStateService))
 
 	// MCP manager for managing MCP client connections
@@ -121,6 +125,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	logger.Debugf(ctx, "[Container] Registering business services...")
 	must(container.Provide(service.NewTenantService))
 	must(container.Provide(service.NewKnowledgeBaseService))
+	must(container.Provide(service.NewOrganizationService))
+	must(container.Provide(service.NewKBShareService)) // KBShareService must be registered before KnowledgeService and KnowledgeTagService
+	must(container.Provide(service.NewAgentShareService))
 	must(container.Provide(service.NewKnowledgeService))
 	must(container.Provide(service.NewChunkService))
 	must(container.Provide(service.NewKnowledgeTagService))
@@ -131,7 +138,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(service.NewUserService))
 
 	// Extract services - register individual extracters with names
-	must(container.Provide(service.NewChunkExtractService, dig.Name("chunkExtracter")))
+	must(container.Provide(service.NewChunkExtractService, dig.Name("chunkExtractor")))
 	must(container.Provide(service.NewDataTableSummaryService, dig.Name("dataTableSummary")))
 
 	must(container.Provide(service.NewMessageService))
@@ -197,6 +204,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(handler.NewMCPServiceHandler))
 	must(container.Provide(handler.NewWebSearchHandler))
 	must(container.Provide(handler.NewCustomAgentHandler))
+	must(container.Provide(service.NewSkillService))
+	must(container.Provide(handler.NewSkillHandler))
+	must(container.Provide(handler.NewOrganizationHandler))
 	logger.Debugf(ctx, "[Container] HTTP handlers registered")
 
 	// Router configuration
@@ -238,6 +248,7 @@ func initRedisClient() (*redis.Client, error) {
 
 	client := redis.NewClient(&redis.Options{
 		Addr:     os.Getenv("REDIS_ADDR"),
+		Username: os.Getenv("REDIS_USERNAME"),
 		Password: os.Getenv("REDIS_PASSWORD"),
 		DB:       db,
 	})
@@ -661,5 +672,10 @@ func registerWebSearchProviders(registry *web_search.Registry) {
 	// Register Google provider
 	registry.Register(web_search.GoogleProviderInfo(), func() (interfaces.WebSearchProvider, error) {
 		return web_search.NewGoogleProvider()
+	})
+
+	// Register Bing provider
+	registry.Register(web_search.BingProviderInfo(), func() (interfaces.WebSearchProvider, error) {
+		return web_search.NewBingProvider()
 	})
 }

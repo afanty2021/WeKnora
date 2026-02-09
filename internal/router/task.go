@@ -19,7 +19,7 @@ type AsynqTaskParams struct {
 	KnowledgeService     interfaces.KnowledgeService
 	KnowledgeBaseService interfaces.KnowledgeBaseService
 	TagService           interfaces.KnowledgeTagService
-	ChunkExtracter       interfaces.TaskHandler `name:"chunkExtracter"`
+	ChunkExtractor       interfaces.TaskHandler `name:"chunkExtractor"`
 	DataTableSummary     interfaces.TaskHandler `name:"dataTableSummary"`
 }
 
@@ -32,6 +32,7 @@ func getAsynqRedisClientOpt() *asynq.RedisClientOpt {
 	}
 	opt := &asynq.RedisClientOpt{
 		Addr:         os.Getenv("REDIS_ADDR"),
+		Username:     os.Getenv("REDIS_USERNAME"),
 		Password:     os.Getenv("REDIS_PASSWORD"),
 		ReadTimeout:  100 * time.Millisecond,
 		WriteTimeout: 200 * time.Millisecond,
@@ -70,7 +71,7 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	mux := asynq.NewServeMux()
 
 	// Register extract handlers - router will dispatch to appropriate handler
-	mux.HandleFunc(types.TypeChunkExtract, params.ChunkExtracter.Handle)
+	mux.HandleFunc(types.TypeChunkExtract, params.ChunkExtractor.Handle)
 	mux.HandleFunc(types.TypeDataTableSummary, params.DataTableSummary.Handle)
 
 	// Register document processing handler

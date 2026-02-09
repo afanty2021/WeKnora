@@ -205,7 +205,22 @@ export default {
     updatePlan: 'Обновить план',
     webSearchFound: 'Найдено <strong>{count}</strong> результатов веб‑поиска',
     argumentsLabel: 'Параметры',
-    toolFallback: 'Инструмент'
+    toolFallback: 'Инструмент',
+    editor: {
+      // Skills Config
+      skillsConfig: 'Skills',
+      skillsConfigDesc: 'Настройка предустановленных Skills для агента, предоставляющих специализированные знания и рабочие процессы',
+      skillsSelection: 'Выбор Skills',
+      skillsSelectionDesc: 'Выберите диапазон Skills, доступных агенту',
+      skillsAll: 'Все',
+      skillsSelected: 'Выбранные',
+      skillsNone: 'Отключено',
+      selectSkills: 'Выбрать Skills',
+      selectSkillsDesc: 'Выберите Skills для активации',
+      noSkillsAvailable: 'Нет доступных предустановленных Skills',
+      skillsInfoTitle: 'Что такое Skills?',
+      skillsInfoContent: 'Skills — это предустановленные модули профессиональных знаний, которые предоставляют агенту инструкции, рабочие процессы и инструменты для конкретных областей. При активации агент автоматически загружает соответствующие знания по мере необходимости.',
+    },
   },
   settings: {
     title: 'Настройки',
@@ -644,6 +659,12 @@ export default {
     file: 'Файл',
     knowledgeBase: 'База знаний',
     noResult: 'Нет результатов',
+  },
+  mentionDetail: {
+    faqCount: '{count} вопросов и ответов',
+    kbCount: '{count} документов',
+    belongsToKb: 'База знаний: ',
+    belongsToOrg: 'Пространство: ',
   },
   file: {
     upload: 'Загрузить файл',
@@ -1780,6 +1801,7 @@ export default {
     knowledgeBase: 'База знаний',
     knowledgeBaseWithCount: 'База знаний ({count})',
     notConfigured: 'Не настроено',
+    sharedAgentModelLabel: 'Модель из общего агента',
     model: 'Модель',
     remote: 'Удалённая',
     noModel: 'Нет доступных моделей',

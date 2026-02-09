@@ -307,6 +307,21 @@ export default {
     webSearchFound: "<strong>{count}</strong>개의 웹 검색 결과 발견",
     argumentsLabel: "파라미터",
     toolFallback: "도구",
+    editor: {
+      // Skills 설정
+      skillsConfig: "스킬 Skills",
+      skillsConfigDesc: "Agent가 사용할 수 있는 사전 설치된 Skills를 구성하여 전문 영역 지식과 워크플로를 제공합니다",
+      skillsSelection: "Skills 선택",
+      skillsSelectionDesc: "Agent가 사용할 수 있는 Skills 범위 선택",
+      skillsAll: "전체",
+      skillsSelected: "지정",
+      skillsNone: "비활성화",
+      selectSkills: "Skills 선택",
+      selectSkillsDesc: "활성화할 Skills 선택",
+      noSkillsAvailable: "사전 설치된 Skills가 없습니다",
+      skillsInfoTitle: "Skills란 무엇인가요?",
+      skillsInfoContent: "Skills는 Agent에 특정 도메인의 지침, 워크플로 및 도구 지원을 제공하는 사전 설치된 전문 지식 모듈입니다. 활성화되면 Agent는 필요할 때 자동으로 관련 지식을 로드합니다.",
+    },
   },
   settings: {
     title: "설정",
@@ -736,6 +751,12 @@ export default {
     file: "파일",
     knowledgeBase: "지식베이스",
     noResult: "결과 없음",
+  },
+  mentionDetail: {
+    faqCount: "Q&A {count}개",
+    kbCount: "문서 {count}개",
+    belongsToKb: "지식베이스: ",
+    belongsToOrg: "공간: ",
   },
   file: {
     upload: "파일 업로드",
@@ -1536,6 +1557,7 @@ export default {
     knowledgeBase: "지식베이스",
     knowledgeBaseWithCount: "지식베이스({count})",
     notConfigured: "구성되지 않음",
+    sharedAgentModelLabel: "공유 에이전트에 구성된 모델",
     model: "모델",
     remote: "원격",
     noModel: "사용 가능한 모델 없음",
